@@ -9,7 +9,6 @@ from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import ServiceValidationError
-from homeassistant.helpers import device_registry as dr
 import pytest
 from pytest_homeassistant_custom_component.common import (
     async_capture_events,
@@ -269,14 +268,15 @@ async def test_state_is_saved(hass: HomeAssistant, hass_storage: dict[str, Any])
 
 
 async def test_request_and_release_services(hass: HomeAssistant) -> None:
-    await _setup(hass, FLOOR)
+    entry = await _setup(hass, FLOOR)
     await hass.services.async_call(
         DOMAIN, "request_power", {"device": "floor heating"}, blocking=True
     )
     await hass.async_block_till_done()
     assert _state(hass, "input_boolean.floor") == "on"
 
-    device_id = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, "floor")}).id
+    coordinator = entry.runtime_data
+    device_id = coordinator.registry_device_id(coordinator.devices["floor"])
     await hass.services.async_call(DOMAIN, "release_power", {"device": device_id}, blocking=True)
     await hass.async_block_till_done()
     assert _state(hass, "input_boolean.floor") == "off"

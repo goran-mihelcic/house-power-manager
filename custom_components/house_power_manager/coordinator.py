@@ -308,14 +308,11 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         )
         if action.reason is Reason.RELEASED:
             return
-        registry_device = dr.async_get(self.hass).async_get_device(
-            identifiers={(DOMAIN, device.id)}
-        )
         self.hass.bus.async_fire(
             EVENT_DEVICE_RESTORED if action.grant else EVENT_DEVICE_SHED,
             {
                 "device": device.name,
-                "device_id": registry_device.id if registry_device else None,
+                "device_id": self.registry_device_id(device),
                 "reason": action.reason.value,
                 "power": device.nominal_power,
                 "grid_import": grid.grid_import,
@@ -352,6 +349,15 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
                 _LOGGER.warning("Cannot %s %s: %s", service, device.control_entity, err)
 
     # ---- Readings --------------------------------------------------------
+
+    def registry_device_id(self, device: ManagedDevice) -> str | None:
+        """The device registry id. `async_get_device` is deprecated from HA 2026.10 and its
+        replacement doesn't exist in older versions, so the entry's devices are searched."""
+        registry = dr.async_get(self.hass)
+        for entry in dr.async_entries_for_config_entry(registry, self.config_entry.entry_id):
+            if (DOMAIN, device.id) in entry.identifiers:
+                return entry.id
+        return None
 
     def measured_power(self, device: ManagedDevice) -> float | None:
         """W from the device's power sensor; None without one or while it can't be read."""
