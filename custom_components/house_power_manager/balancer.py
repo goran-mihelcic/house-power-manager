@@ -90,6 +90,7 @@ class Reason(StrEnum):
     OVER_TARGET = "over_target"
     EMERGENCY = "emergency"  # import above the hard limit
     PREEMPTED = "preempted"  # made room for a more important device
+    MANUAL = "manual"  # switched outside the integration: followed, not decided here
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +108,9 @@ class DeviceInput:
     latency: float = 0  # s before a grant change shows in the measurement
     changed_at: float | None = None  # last grant change
     commanded_at: float | None = None  # last command to the device, e.g. re-applying a grant
+    # Switched outside the integration: its power isn't anticipated, so it is only shed
+    # once the measurement shows import over target
+    followed: bool = False
 
     def settling(self, now: float) -> bool:
         """A recent change or command may not show in the measurement yet."""
@@ -127,7 +131,7 @@ class DeviceInput:
 
     def unseen(self, now: float) -> float:
         """W a recent grant change will still add to (negative: remove from) the measurement."""
-        if not self.settling(now):
+        if self.followed or not self.settling(now):
             return 0.0
         measured = self.measured_power
         if self.granted:

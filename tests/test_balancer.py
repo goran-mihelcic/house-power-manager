@@ -226,3 +226,13 @@ def test_command_in_flight_counts_as_load() -> None:
     floor = on("floor", 5, 2000, changed_at=NOW - 3600, commanded_at=NOW, latency=10)
     devices = [floor, dev("pool", 1, 1000)]
     assert decide(grid(5000), devices, NOW, 200) == []
+
+
+def test_device_switched_by_hand_is_not_shed_in_advance() -> None:
+    # Switched on by hand 2 s ago, not measured yet: wait for the measurement
+    floor = on("floor", 1, 2000, changed_at=NOW - 2, latency=10, followed=True)
+    assert decide(grid(6000), [floor], NOW) == []
+    # ...but other devices are not restored meanwhile
+    assert decide(grid(1000), [floor, dev("pool", 9, 500)], NOW) == []
+    # Once it shows and import is over target, it is balanced like any other device
+    assert changes(decide(grid(8000), [floor], NOW + 10)) == [("floor", False, Reason.EMERGENCY)]

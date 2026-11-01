@@ -42,7 +42,7 @@ Settings → Devices & services → **House Power Manager** → **Add managed de
 | Minimum on / off time | Protects compressors and avoids churn. Minimum on time is ignored when import exceeds the hard limit. |
 | Latency | Seconds until a command shows in the grid measurement. Use 30–60 s for cloud devices (LG ThinQ). |
 
-> **The integration owns the control entity.** A managed device that is on without a granted request is switched off, and one switched by hand is put back. Turn the device's **Managed** switch off to operate it yourself.
+> **Switching a device by hand is followed, not fought.** If a managed device is switched on or off outside the integration (wall switch, app, another automation), that becomes its new request and grant. A device switched on by hand still counts in balancing: when the measurement shows import over target it can be shed like any other, and it comes back on once there is room. Turn the device's **Managed** switch off to keep the integration from ever switching it.
 
 ### How balancing works
 
@@ -50,6 +50,7 @@ Settings → Devices & services → **House Power Manager** → **Add managed de
 - **Under target:** one requested device is restored per cycle, most important first, when headroom ≥ its nominal power + hysteresis. Nothing is restored while an earlier change hasn't shown in the measurement yet (latency).
 - **Priority:** if the most important waiting device doesn't fit, less important running devices are shed to make room for it.
 - **Sensor fault:** grants are held, nothing new is switched on; ended requests are still switched off.
+- **Manual changes:** followed. The power of a device switched on by hand is not anticipated: it is only shed once the measurement shows import over target.
 - **Restart:** requests and grants are restored and re-applied straight away; the balancer then sheds if needed.
 - **Disabled** (`switch.hpm_enabled` off): devices are left alone.
 

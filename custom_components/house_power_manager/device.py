@@ -9,7 +9,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.helpers.device_registry import DeviceInfo
 
-from .balancer import DeviceInput
+from .balancer import DeviceInput, Reason
 from .const import (
     CONF_CONTROL_ENTITY,
     CONF_LATENCY,
@@ -87,6 +87,7 @@ class ManagedDevice:
             latency=self.latency,
             changed_at=self.changed_at,
             commanded_at=self.commanded_at,
+            followed=self.reason == Reason.MANUAL,
         )
 
     @property

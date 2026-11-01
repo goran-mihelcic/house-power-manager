@@ -154,10 +154,18 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
 
     @callback
     def async_start(self) -> None:
-        """Re-evaluate whenever the grid sensor changes."""
+        """Re-evaluate whenever the grid sensor changes; follow devices switched by others."""
         self.config_entry.async_on_unload(
             async_track_state_change_event(self.hass, self.grid_sensor, self._async_grid_changed)
         )
+        if self.devices:
+            self.config_entry.async_on_unload(
+                async_track_state_change_event(
+                    self.hass,
+                    [device.control_entity for device in self.devices.values()],
+                    self._async_control_changed,
+                )
+            )
 
     async def async_shutdown(self) -> None:
         await super().async_shutdown()
@@ -176,6 +184,38 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
     @callback
     def _async_grid_changed(self, event: Event[EventStateChangedData]) -> None:
         self.config_entry.async_create_task(self.hass, self.async_request_refresh())
+
+    @callback
+    def _async_control_changed(self, event: Event[EventStateChangedData]) -> None:
+        """A device switched on or off by someone else becomes the new request and grant.
+
+        Normal balancing then applies: a device switched on by hand is shed like any
+        other when import goes over target.
+        """
+        old, new = event.data["old_state"], event.data["new_state"]
+        if not _known(old) or not _known(new):
+            return  # coming online or dropping out is not a manual change
+        is_on = new.state != STATE_OFF
+        if is_on == (old.state != STATE_OFF):
+            return
+        device = next((d for d in self.devices.values() if d.control_entity == new.entity_id), None)
+        if device is None or not device.managed or is_on == device.granted:
+            return
+        now = dt_util.utcnow().timestamp()
+        if device.commanded_at is not None and now - device.commanded_at < device.latency:
+            return  # our own command is still taking effect
+        _LOGGER.info(
+            "%s switched %s outside House Power Manager: following",
+            device.name,
+            "on" if is_on else "off",
+        )
+        device.requested = device.granted = is_on
+        device.changed_at = now
+        device.reason = Reason.MANUAL
+        device.commanded_at = None
+        self._save()
+        self.async_update_listeners()
+        self._refresh_now()
 
     @callback
     def _refresh_now(self) -> None:
@@ -388,14 +428,16 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
 
     @callback
     def async_set_managed(self, device: ManagedDevice, managed: bool) -> None:
-        """When management resumes, a device that is on and requested keeps running."""
+        """When management resumes, the device's current state is taken over."""
         if managed == device.managed:
             return
         _LOGGER.info("%s %s", device.name, "managed" if managed else "overridden: left alone")
         device.managed = managed
         if managed:
             state = self.hass.states.get(device.control_entity)
-            device.granted = device.requested and _known(state) and state.state != STATE_OFF
+            is_on = _known(state) and state.state != STATE_OFF
+            device.granted = is_on
+            device.requested = device.requested or is_on
             device.commanded_at = None
         self._save()
         self.async_update_listeners()

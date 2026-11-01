@@ -143,15 +143,69 @@ async def test_min_on_time_delays_release(
     assert _state(hass, "input_boolean.floor") == "off"
 
 
-async def test_device_switched_by_hand_is_put_back(
+async def _by_hand(hass: HomeAssistant, entity_id: str, on: bool) -> None:
+    await hass.services.async_call(
+        "input_boolean", "turn_on" if on else "turn_off", {"entity_id": entity_id}, blocking=True
+    )
+    await hass.async_block_till_done()
+
+
+async def test_switched_on_by_hand_is_followed(
     hass: HomeAssistant, freezer: FrozenDateTimeFactory
 ) -> None:
     await _setup(hass, FLOOR)
-    await hass.services.async_call(
-        "input_boolean", "turn_on", {"entity_id": "input_boolean.floor"}, blocking=True
-    )
+    await _by_hand(hass, "input_boolean.floor", True)
+    await _elapse(hass, freezer, 6)
+    assert _state(hass, "input_boolean.floor") == "on"
+    assert _state(hass, "switch.floor_heating_requested") == "on"
+    assert _state(hass, "sensor.floor_heating_state") == "running"
+    assert hass.states.get("sensor.floor_heating_state").attributes["reason"] == "manual"
+
+
+async def test_switched_off_by_hand_is_followed(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    await _setup(hass, FLOOR)
+    await _switch(hass, "switch.floor_heating_requested", True)
+    await _elapse(hass, freezer, 11)
+    await _by_hand(hass, "input_boolean.floor", False)
     await _elapse(hass, freezer, 6)
     assert _state(hass, "input_boolean.floor") == "off"
+    assert _state(hass, "switch.floor_heating_requested") == "off"
+    assert _state(hass, "sensor.floor_heating_state") == "idle"
+
+
+async def test_switched_on_by_hand_is_still_shed_over_target(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    await _setup(hass, FLOOR, grid=6000)  # not enough room for the floor heating
+    shed = async_capture_events(hass, EVENT_DEVICE_SHED)
+    await _by_hand(hass, "input_boolean.floor", True)
+    assert _state(hass, "input_boolean.floor") == "on"  # followed while its power arrives
+
+    await _elapse(hass, freezer, 11)
+    set_grid(hass, 8000)  # its 2000 W is in the measurement: over the limit
+    await hass.async_block_till_done()
+    assert _state(hass, "input_boolean.floor") == "off"
+    assert [e.data["reason"] for e in shed] == ["emergency"]
+    # Still requested: switched on again once there is room
+    assert _state(hass, "sensor.floor_heating_state") == "shed"
+    await _elapse(hass, freezer, 11)
+    set_grid(hass, 3000)
+    await hass.async_block_till_done()
+    assert _state(hass, "input_boolean.floor") == "on"
+
+
+async def test_late_report_of_own_command_is_not_manual(hass: HomeAssistant) -> None:
+    slow = device("ac", "AC", "input_boolean.floor", 1000, **{CONF_LATENCY: 30})
+    await _setup(hass, slow)
+    await _switch(hass, "switch.ac_requested", True)
+    assert _state(hass, "input_boolean.floor") == "on"
+    # A cloud device briefly reports its old state before settling
+    hass.states.async_set("input_boolean.floor", "off")
+    await hass.async_block_till_done()
+    assert _state(hass, "switch.ac_requested") == "on"
+    assert _state(hass, "binary_sensor.ac_granted") == "on"
 
 
 async def test_unmanaged_device_is_left_alone(
@@ -160,15 +214,16 @@ async def test_unmanaged_device_is_left_alone(
     await _setup(hass, FLOOR)
     await _switch(hass, "switch.floor_heating_managed", False)
     assert _state(hass, "sensor.floor_heating_state") == "override"
-    await hass.services.async_call(
-        "input_boolean", "turn_on", {"entity_id": "input_boolean.floor"}, blocking=True
-    )
+    await _by_hand(hass, "input_boolean.floor", True)
     await _elapse(hass, freezer, 6)
     assert _state(hass, "input_boolean.floor") == "on"
+    assert _state(hass, "switch.floor_heating_requested") == "off"
 
-    # Managed again: on but not requested, so it is switched off
+    # Managed again: its current state is taken over
     await _switch(hass, "switch.floor_heating_managed", True)
-    assert _state(hass, "input_boolean.floor") == "off"
+    assert _state(hass, "input_boolean.floor") == "on"
+    assert _state(hass, "switch.floor_heating_requested") == "on"
+    assert _state(hass, "sensor.floor_heating_state") == "running"
 
 
 async def test_disabled_leaves_devices_alone(hass: HomeAssistant) -> None:
