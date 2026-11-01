@@ -1,4 +1,4 @@
-"""Grid import, headroom, managed load and status sensors."""
+"""Grid import, headroom, managed load and status; granted power and state per device."""
 
 from __future__ import annotations
 
@@ -17,10 +17,12 @@ from homeassistant.const import UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import StateType
+from homeassistant.util import dt as dt_util
 
 from .balancer import Status
 from .coordinator import HpmConfigEntry, HpmCoordinator
-from .entity import HpmEntity
+from .device import DeviceState, ManagedDevice
+from .entity import HpmDeviceEntity, HpmEntity
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -72,8 +74,7 @@ SENSORS: tuple[HpmSensorDescription, ...] = (
         value_fn=lambda ctl: ctl.data.headroom,
         attrs_fn=_headroom_attrs,
     ),
-    # Sum of granted device power; there are no managed devices yet.
-    _power("managed_load", value_fn=lambda _: 0.0),
+    _power("managed_load", value_fn=lambda ctl: ctl.managed_load),
     HpmSensorDescription(
         key="status",
         translation_key="status",
@@ -90,7 +91,16 @@ async def async_setup_entry(
     entry: HpmConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    async_add_entities(HpmSensor(entry.runtime_data, description) for description in SENSORS)
+    coordinator = entry.runtime_data
+    async_add_entities(HpmSensor(coordinator, description) for description in SENSORS)
+    for device in coordinator.devices.values():
+        async_add_entities(
+            [
+                GrantedPowerSensor(coordinator, device, GRANTED_POWER),
+                DeviceStateSensor(coordinator, device, DEVICE_STATE),
+            ],
+            config_subentry_id=device.id,
+        )
 
 
 class HpmSensor(HpmEntity, SensorEntity):
@@ -106,3 +116,53 @@ class HpmSensor(HpmEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return self.entity_description.attrs_fn(self.coordinator)
+
+
+GRANTED_POWER = SensorEntityDescription(
+    key="granted_power",
+    translation_key="granted_power",
+    device_class=SensorDeviceClass.POWER,
+    native_unit_of_measurement=UnitOfPower.WATT,
+    state_class=SensorStateClass.MEASUREMENT,
+    suggested_display_precision=0,
+)
+DEVICE_STATE = SensorEntityDescription(
+    key="state",
+    translation_key="device_state",
+    device_class=SensorDeviceClass.ENUM,
+    options=[state.value for state in DeviceState],
+)
+
+
+class GrantedPowerSensor(HpmDeviceEntity, SensorEntity):
+    """Measured power while granted (nominal without a power sensor), else 0."""
+
+    @property
+    def native_value(self) -> float:
+        return self.coordinator.granted_power(self._device)
+
+
+class DeviceStateSensor(HpmDeviceEntity, SensorEntity):
+    """What the integration is doing with the device, and why."""
+
+    @property
+    def native_value(self) -> str:
+        return self._device.state
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        device: ManagedDevice = self._device
+        changed_at = device.changed_at
+        return {
+            "priority": device.priority,
+            "nominal_power": device.nominal_power,
+            "control_entity": device.control_entity,
+            "power_sensor": device.power_sensor,
+            "requested": device.requested,
+            "granted": device.granted,
+            "managed": device.managed,
+            "reason": device.reason,
+            "last_change": (
+                dt_util.utc_from_timestamp(changed_at).isoformat() if changed_at else None
+            ),
+        }

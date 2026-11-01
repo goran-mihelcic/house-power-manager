@@ -96,8 +96,11 @@ Fire events `house_power_manager_device_shed` / `_device_restored` with reason, 
 
 ## 8. Open questions (ask before assuming)
 
-- Is the 7.6 kW limit single-phase or per-phase on a three-phase connection? If three-phase, the balancer needs per-phase import and per-phase device assignment.
+Decided (2026-11-01):
+- **Single phase for now.** One grid import measurement, no per-phase assignment. Keep the balancer easy to extend to per-phase later.
+- **On HA restart, restore the situation before the restart:** requests and grants are persisted and re-applied immediately; the balancer then sheds if needed.
+
+Still open:
 - How fast does the limiter trip (instant vs time-delayed overload)? This sets how aggressive shedding must be.
 - TeltoCharge control method in HA (OCPP, Modbus, or other), and whether 1P/3P switching should be managed by this integration.
 - Should the heat pump be controlled directly (on/off via ThinQ) or by lowering its setpoint / switching mode, given cloud latency?
-- Desired behaviour on HA restart: re-apply last grants immediately, or start conservative and ramp up?

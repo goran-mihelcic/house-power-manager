@@ -7,6 +7,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from custom_components.house_power_manager.const import (
     CONF_FAULT_TIMEOUT,
     CONF_GRID_SENSOR,
+    CONF_HYSTERESIS,
     CONF_IMPORT_LIMIT,
     CONF_MARGIN,
     CONF_SIGN,
@@ -23,6 +24,7 @@ USER_INPUT = {
     CONF_SIGN: SIGN_IMPORT_POSITIVE,
     CONF_IMPORT_LIMIT: 7600.0,
     CONF_MARGIN: 400.0,
+    CONF_HYSTERESIS: 200.0,
     CONF_UPDATE_INTERVAL: 5.0,
     CONF_FAULT_TIMEOUT: 60.0,
 }

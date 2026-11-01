@@ -5,13 +5,10 @@ from typing import Any
 
 from freezegun.api import FrozenDateTimeFactory
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.core import HomeAssistant, State
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 import pytest
-from pytest_homeassistant_custom_component.common import (
-    async_fire_time_changed,
-    mock_restore_cache,
-)
+from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from custom_components.house_power_manager.const import (
     CONF_IMPORT_LIMIT,
@@ -20,7 +17,7 @@ from custom_components.house_power_manager.const import (
     SIGN_IMPORT_NEGATIVE,
 )
 
-from .conftest import set_grid, setup_hpm
+from .conftest import STORAGE_KEY, set_grid, setup_hpm
 
 
 def _state(hass: HomeAssistant, entity_id: str) -> str:
@@ -180,8 +177,10 @@ async def test_enabled_switch(hass: HomeAssistant) -> None:
     assert hass.states.get("sensor.hpm_status").attributes["enabled"] is False
 
 
-async def test_enabled_switch_restored_off(hass: HomeAssistant) -> None:
-    mock_restore_cache(hass, [State("switch.hpm_enabled", "off")])
+async def test_enabled_switch_restored_off(
+    hass: HomeAssistant, hass_storage: dict[str, Any]
+) -> None:
+    hass_storage[STORAGE_KEY] = {"version": 1, "data": {"enabled": False, "devices": {}}}
     set_grid(hass, 1000)
     entry = await setup_hpm(hass)
     assert _state(hass, "switch.hpm_enabled") == "off"

@@ -1,0 +1,48 @@
+request_power:
+  fields:
+    device:
+      required: true
+      selector:
+        device:
+          filter:
+            - integration: house_power_manager
+              model: Managed device
+    power:
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 50000
+          step: 50
+          unit_of_measurement: W
+          mode: box
+
+release_power:
+  fields:
+    device:
+      required: true
+      selector:
+        device:
+          filter:
+            - integration: house_power_manager
+              model: Managed device
+
+set_priority:
+  fields:
+    device:
+      required: true
+      selector:
+        device:
+          filter:
+            - integration: house_power_manager
+              model: Managed device
+    priority:
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          mode: box
+
+rebalance:

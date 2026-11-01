@@ -3,12 +3,13 @@
     "step": {
       "user": {
         "title": "House Power Manager",
-        "description": "Keeps grid import below the connection limit. Managed devices are added later.",
+        "description": "Keeps grid import below the connection limit. Add the devices to manage afterwards with **Add managed device**.",
         "data": {
           "grid_sensor": "Grid power sensor",
           "sign_convention": "Sign convention",
           "import_limit": "Import limit",
           "margin": "Margin",
+          "hysteresis": "Restore hysteresis",
           "update_interval": "Update interval",
           "fault_timeout": "Sensor fault timeout"
         },
@@ -17,6 +18,7 @@
           "sign_convention": "How the sensor reports power drawn from the grid.",
           "import_limit": "Grid import at which the limiter cuts supply.",
           "margin": "Import is kept this far below the limit. Target = limit − margin.",
+          "hysteresis": "A device is restored only when headroom exceeds its power by this much, so it isn't shed again straight away.",
           "update_interval": "Re-check this often even when the sensor does not change.",
           "fault_timeout": "Without a fresh reading for this long the sensor is treated as faulty."
         }
@@ -40,6 +42,7 @@
           "sign_convention": "Sign convention",
           "import_limit": "Import limit",
           "margin": "Margin",
+          "hysteresis": "Restore hysteresis",
           "update_interval": "Update interval",
           "fault_timeout": "Sensor fault timeout"
         },
@@ -48,6 +51,7 @@
           "sign_convention": "How the sensor reports power drawn from the grid.",
           "import_limit": "Grid import at which the limiter cuts supply.",
           "margin": "Import is kept this far below the limit. Target = limit − margin.",
+          "hysteresis": "A device is restored only when headroom exceeds its power by this much, so it isn't shed again straight away.",
           "update_interval": "Re-check this often even when the sensor does not change.",
           "fault_timeout": "Without a fresh reading for this long the sensor is treated as faulty."
         }
@@ -59,6 +63,72 @@
       "margin_too_large": "The margin must be smaller than the import limit."
     }
   },
+  "config_subentries": {
+    "device": {
+      "initiate_flow": {
+        "user": "Add managed device",
+        "reconfigure": "Change managed device"
+      },
+      "entry_type": "Managed device",
+      "step": {
+        "user": {
+          "title": "Managed device",
+          "description": "A load switched on and off by House Power Manager. Once added, turn on its **Requested** switch (or call `house_power_manager.request_power`) instead of switching the device directly.",
+          "data": {
+            "name": "Name",
+            "priority": "Priority",
+            "control_entity": "Control entity",
+            "nominal_power": "Nominal power",
+            "power_sensor": "Power sensor",
+            "min_on_time": "Minimum on time",
+            "min_off_time": "Minimum off time",
+            "latency": "Latency"
+          },
+          "data_description": {
+            "priority": "1 is shed first. A device can take power from running devices with a lower number.",
+            "control_entity": "The switch (or climate, water heater, fan, light) turned on when power is granted and off when it is shed.",
+            "nominal_power": "Power drawn when running. Used to decide whether there is room to switch it on.",
+            "power_sensor": "Optional. The device's real consumption, used instead of the nominal power when deciding what to shed.",
+            "min_on_time": "Not shed sooner than this after being switched on, unless import exceeds the hard limit.",
+            "min_off_time": "Not switched on again sooner than this after being switched off.",
+            "latency": "How long until a command shows in the grid measurement. Use more for cloud devices."
+          }
+        },
+        "reconfigure": {
+          "title": "Managed device",
+          "data": {
+            "name": "Name",
+            "priority": "Priority",
+            "control_entity": "Control entity",
+            "nominal_power": "Nominal power",
+            "power_sensor": "Power sensor",
+            "min_on_time": "Minimum on time",
+            "min_off_time": "Minimum off time",
+            "latency": "Latency"
+          },
+          "data_description": {
+            "priority": "1 is shed first. A device can take power from running devices with a lower number.",
+            "control_entity": "The switch (or climate, water heater, fan, light) turned on when power is granted and off when it is shed.",
+            "nominal_power": "Power drawn when running. Used to decide whether there is room to switch it on.",
+            "power_sensor": "Optional. The device's real consumption, used instead of the nominal power when deciding what to shed.",
+            "min_on_time": "Not shed sooner than this after being switched on, unless import exceeds the hard limit.",
+            "min_off_time": "Not switched on again sooner than this after being switched off.",
+            "latency": "How long until a command shows in the grid measurement. Use more for cloud devices."
+          }
+        }
+      },
+      "error": {
+        "name_required": "Enter a name.",
+        "name_in_use": "Another managed device has this name.",
+        "control_in_use": "Another managed device already uses this control entity.",
+        "sensor_not_found": "The sensor does not exist.",
+        "unsupported_unit": "The sensor must report power in W, kW or MW."
+      },
+      "abort": {
+        "reconfigure_successful": "The managed device was updated."
+      }
+    }
+  },
   "selector": {
     "sign_convention": {
       "options": {
@@ -68,6 +138,9 @@
     }
   },
   "entity": {
+    "binary_sensor": {
+      "granted": { "name": "Granted" }
+    },
     "sensor": {
       "grid_import": { "name": "Grid import" },
       "headroom": { "name": "Headroom" },
@@ -80,6 +153,17 @@
           "emergency": "Emergency",
           "sensor_fault": "Sensor fault"
         }
+      },
+      "granted_power": { "name": "Granted power" },
+      "device_state": {
+        "name": "State",
+        "state": {
+          "idle": "Idle",
+          "running": "Running",
+          "throttled": "Throttled",
+          "shed": "Shed",
+          "override": "Override"
+        }
       }
     },
     "number": {
@@ -87,12 +171,64 @@
       "margin": { "name": "Margin" }
     },
     "switch": {
-      "enabled": { "name": "Enabled" }
+      "enabled": { "name": "Enabled" },
+      "requested": { "name": "Requested" },
+      "managed": { "name": "Managed" }
+    }
+  },
+  "services": {
+    "request_power": {
+      "name": "Request power",
+      "description": "Asks for power for a managed device. It is switched on when there is headroom.",
+      "fields": {
+        "device": {
+          "name": "Device",
+          "description": "The managed device (device ID or name)."
+        },
+        "power": {
+          "name": "Power",
+          "description": "For adjustable devices: the power wanted. Ignored by switched devices."
+        }
+      }
+    },
+    "release_power": {
+      "name": "Release power",
+      "description": "Ends the request for a managed device. It is switched off once its minimum on time has passed.",
+      "fields": {
+        "device": {
+          "name": "Device",
+          "description": "The managed device (device ID or name)."
+        }
+      }
+    },
+    "set_priority": {
+      "name": "Set priority",
+      "description": "Changes a managed device's priority (1 is shed first).",
+      "fields": {
+        "device": {
+          "name": "Device",
+          "description": "The managed device (device ID or name)."
+        },
+        "priority": {
+          "name": "Priority",
+          "description": "1 to 100. 1 is shed first."
+        }
+      }
+    },
+    "rebalance": {
+      "name": "Rebalance",
+      "description": "Runs a balancing cycle now."
     }
   },
   "exceptions": {
     "margin_too_large": {
       "message": "The margin must be smaller than the import limit."
+    },
+    "unknown_device": {
+      "message": "No managed device {device}."
+    },
+    "not_loaded": {
+      "message": "House Power Manager is not loaded."
     }
   }
 }

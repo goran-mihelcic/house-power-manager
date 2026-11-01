@@ -1,0 +1,306 @@
+"""Managed devices: requests, grants, control entities, persistence, services and flows."""
+
+from datetime import timedelta
+from typing import Any
+
+from freezegun.api import FrozenDateTimeFactory
+from homeassistant.config_entries import SOURCE_RECONFIGURE, SOURCE_USER
+from homeassistant.const import CONF_NAME
+from homeassistant.core import HomeAssistant
+from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import device_registry as dr
+import pytest
+from pytest_homeassistant_custom_component.common import (
+    async_capture_events,
+    async_fire_time_changed,
+)
+
+from custom_components.house_power_manager.const import (
+    CONF_CONTROL_ENTITY,
+    CONF_LATENCY,
+    CONF_MIN_OFF_TIME,
+    CONF_MIN_ON_TIME,
+    CONF_NOMINAL_POWER,
+    CONF_PRIORITY,
+    DOMAIN,
+    EVENT_DEVICE_RESTORED,
+    EVENT_DEVICE_SHED,
+    SUBENTRY_DEVICE,
+)
+
+from .conftest import STORAGE_KEY, device, set_grid, setup_booleans, setup_hpm
+
+FLOOR = device("floor", "Floor heating", "input_boolean.floor", 2000, priority=5)
+POOL = device("pool", "Pool pump", "input_boolean.pool", 1000, priority=1)
+
+
+def _state(hass: HomeAssistant, entity_id: str) -> str:
+    return hass.states.get(entity_id).state
+
+
+async def _elapse(hass: HomeAssistant, freezer: FrozenDateTimeFactory, seconds: float) -> None:
+    freezer.tick(timedelta(seconds=seconds))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+
+async def _switch(hass: HomeAssistant, entity_id: str, on: bool) -> None:
+    await hass.services.async_call(
+        "switch", "turn_on" if on else "turn_off", {"entity_id": entity_id}, blocking=True
+    )
+    await hass.async_block_till_done()
+
+
+async def _setup(hass: HomeAssistant, *devices: dict[str, Any], grid: float = 1000):
+    await setup_booleans(hass, "floor", "pool")
+    set_grid(hass, grid)
+    return await setup_hpm(hass, list(devices))
+
+
+async def test_device_entities(hass: HomeAssistant) -> None:
+    await _setup(hass, FLOOR)
+    assert _state(hass, "switch.floor_heating_requested") == "off"
+    assert _state(hass, "switch.floor_heating_managed") == "on"
+    assert _state(hass, "binary_sensor.floor_heating_granted") == "off"
+    assert _state(hass, "sensor.floor_heating_granted_power") == "0.0"
+    assert _state(hass, "sensor.floor_heating_state") == "idle"
+    attrs = hass.states.get("sensor.floor_heating_state").attributes
+    assert attrs["priority"] == 5
+    assert attrs["control_entity"] == "input_boolean.floor"
+
+
+async def test_request_is_granted_and_switches_the_device(hass: HomeAssistant) -> None:
+    await _setup(hass, FLOOR)
+    restored = async_capture_events(hass, EVENT_DEVICE_RESTORED)
+    await _switch(hass, "switch.floor_heating_requested", True)
+
+    assert _state(hass, "input_boolean.floor") == "on"
+    assert _state(hass, "binary_sensor.floor_heating_granted") == "on"
+    assert _state(hass, "sensor.floor_heating_state") == "running"
+    assert float(_state(hass, "sensor.floor_heating_granted_power")) == 2000
+    assert float(_state(hass, "sensor.hpm_managed_load")) == 2000
+    assert [e.data["reason"] for e in restored] == ["headroom"]
+    assert restored[0].data["device"] == "Floor heating"
+
+
+async def test_no_headroom_no_grant(hass: HomeAssistant) -> None:
+    await _setup(hass, FLOOR, grid=6000)  # headroom 1200 W < 2000 + 200
+    await _switch(hass, "switch.floor_heating_requested", True)
+    assert _state(hass, "input_boolean.floor") == "off"
+    assert _state(hass, "sensor.floor_heating_state") == "shed"
+
+
+async def test_over_target_sheds_least_important(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    await _setup(hass, FLOOR, POOL)
+    shed = async_capture_events(hass, EVENT_DEVICE_SHED)
+    await _switch(hass, "switch.floor_heating_requested", True)
+    await _switch(hass, "switch.pool_pump_requested", True)
+    assert _state(hass, "input_boolean.pool") == "off"  # waits for the floor heating to settle
+    await _elapse(hass, freezer, 11)
+    assert _state(hass, "input_boolean.pool") == "on"
+
+    await _elapse(hass, freezer, 11)
+    set_grid(hass, 7500)  # 300 W over target
+    await hass.async_block_till_done()
+    assert _state(hass, "input_boolean.pool") == "off"
+    assert _state(hass, "input_boolean.floor") == "on"
+    assert _state(hass, "sensor.pool_pump_state") == "shed"
+    assert [(e.data["device"], e.data["reason"]) for e in shed] == [("Pool pump", "over_target")]
+
+    # The pool pump's 1000 W leaves the measurement: under target, nothing else is shed
+    set_grid(hass, 6500)
+    await _elapse(hass, freezer, 11)
+    assert _state(hass, "input_boolean.floor") == "on"
+    assert [e.data["device"] for e in shed] == ["Pool pump"]
+
+    # Import drops: the pool pump comes back once there is room for it
+    await _elapse(hass, freezer, 2)
+    set_grid(hass, 5000)
+    await hass.async_block_till_done()
+    assert _state(hass, "input_boolean.pool") == "on"
+
+
+async def test_release_switches_off(hass: HomeAssistant) -> None:
+    await _setup(hass, FLOOR)
+    await _switch(hass, "switch.floor_heating_requested", True)
+    await _switch(hass, "switch.floor_heating_requested", False)
+    assert _state(hass, "input_boolean.floor") == "off"
+    assert _state(hass, "sensor.floor_heating_state") == "idle"
+
+
+async def test_min_on_time_delays_release(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    ac = device("ac", "AC", "input_boolean.floor", 1000, **{CONF_MIN_ON_TIME: 60})
+    await _setup(hass, ac)
+    await _switch(hass, "switch.ac_requested", True)
+    await _switch(hass, "switch.ac_requested", False)
+    assert _state(hass, "input_boolean.floor") == "on"
+    await _elapse(hass, freezer, 61)
+    assert _state(hass, "input_boolean.floor") == "off"
+
+
+async def test_device_switched_by_hand_is_put_back(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    await _setup(hass, FLOOR)
+    await hass.services.async_call(
+        "input_boolean", "turn_on", {"entity_id": "input_boolean.floor"}, blocking=True
+    )
+    await _elapse(hass, freezer, 6)
+    assert _state(hass, "input_boolean.floor") == "off"
+
+
+async def test_unmanaged_device_is_left_alone(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    await _setup(hass, FLOOR)
+    await _switch(hass, "switch.floor_heating_managed", False)
+    assert _state(hass, "sensor.floor_heating_state") == "override"
+    await hass.services.async_call(
+        "input_boolean", "turn_on", {"entity_id": "input_boolean.floor"}, blocking=True
+    )
+    await _elapse(hass, freezer, 6)
+    assert _state(hass, "input_boolean.floor") == "on"
+
+    # Managed again: on but not requested, so it is switched off
+    await _switch(hass, "switch.floor_heating_managed", True)
+    assert _state(hass, "input_boolean.floor") == "off"
+
+
+async def test_disabled_leaves_devices_alone(hass: HomeAssistant) -> None:
+    await _setup(hass, FLOOR)
+    await _switch(hass, "switch.hpm_enabled", False)
+    await _switch(hass, "switch.floor_heating_requested", True)
+    assert _state(hass, "input_boolean.floor") == "off"
+    await _switch(hass, "switch.hpm_enabled", True)
+    assert _state(hass, "input_boolean.floor") == "on"
+
+
+async def test_restart_restores_requests_and_grants(
+    hass: HomeAssistant, hass_storage: dict[str, Any]
+) -> None:
+    hass_storage[STORAGE_KEY] = {
+        "version": 1,
+        "data": {
+            "enabled": True,
+            "devices": {
+                "floor": {"requested": True, "granted": True, "managed": True},
+                "pool": {"requested": True, "granted": False, "managed": True},
+            },
+        },
+    }
+    await _setup(hass, FLOOR, POOL, grid=5000)  # room for the floor heating only
+    assert _state(hass, "input_boolean.floor") == "on"
+    assert _state(hass, "switch.floor_heating_requested") == "on"
+    assert _state(hass, "switch.pool_pump_requested") == "on"
+    assert _state(hass, "sensor.pool_pump_state") == "shed"
+
+
+async def test_state_is_saved(hass: HomeAssistant, hass_storage: dict[str, Any]) -> None:
+    entry = await _setup(hass, FLOOR)
+    await _switch(hass, "switch.floor_heating_requested", True)
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    stored = hass_storage[STORAGE_KEY]["data"]["devices"]["floor"]
+    assert stored["requested"] is True
+    assert stored["granted"] is True
+    assert stored["reason"] == "headroom"
+
+
+# ---- Services -----------------------------------------------------------
+
+
+async def test_request_and_release_services(hass: HomeAssistant) -> None:
+    await _setup(hass, FLOOR)
+    await hass.services.async_call(
+        DOMAIN, "request_power", {"device": "floor heating"}, blocking=True
+    )
+    await hass.async_block_till_done()
+    assert _state(hass, "input_boolean.floor") == "on"
+
+    device_id = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, "floor")}).id
+    await hass.services.async_call(DOMAIN, "release_power", {"device": device_id}, blocking=True)
+    await hass.async_block_till_done()
+    assert _state(hass, "input_boolean.floor") == "off"
+
+
+async def test_unknown_device(hass: HomeAssistant) -> None:
+    await _setup(hass, FLOOR)
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(DOMAIN, "request_power", {"device": "sauna"}, blocking=True)
+
+
+async def test_set_priority_applies_without_reload(hass: HomeAssistant) -> None:
+    entry = await _setup(hass, FLOOR)
+    coordinator = entry.runtime_data
+    await hass.services.async_call(
+        DOMAIN, "set_priority", {"device": "Floor heating", "priority": 80}, blocking=True
+    )
+    await hass.async_block_till_done()
+    assert entry.subentries["floor"].data[CONF_PRIORITY] == 80
+    assert entry.runtime_data is coordinator
+    assert hass.states.get("sensor.floor_heating_state").attributes["priority"] == 80
+
+
+async def test_rebalance(hass: HomeAssistant) -> None:
+    await _setup(hass, FLOOR)
+    await hass.services.async_call(DOMAIN, "rebalance", {}, blocking=True)
+
+
+# ---- Subentry flows -----------------------------------------------------
+
+NEW_DEVICE = {
+    CONF_NAME: "Pool pump",
+    CONF_PRIORITY: 1,
+    CONF_CONTROL_ENTITY: "input_boolean.pool",
+    CONF_NOMINAL_POWER: 1000,
+    CONF_MIN_ON_TIME: 0,
+    CONF_MIN_OFF_TIME: 0,
+    CONF_LATENCY: 10,
+}
+
+
+async def test_add_device(hass: HomeAssistant) -> None:
+    entry = await _setup(hass, FLOOR)
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, SUBENTRY_DEVICE), context={"source": SOURCE_USER}
+    )
+    assert result["type"] is FlowResultType.FORM
+    result = await hass.config_entries.subentries.async_configure(result["flow_id"], NEW_DEVICE)
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    assert _state(hass, "sensor.pool_pump_state") == "idle"
+    assert _state(hass, "switch.floor_heating_requested") == "off"
+
+
+async def test_add_device_validation(hass: HomeAssistant) -> None:
+    entry = await _setup(hass, FLOOR)
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, SUBENTRY_DEVICE), context={"source": SOURCE_USER}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        {**NEW_DEVICE, CONF_NAME: "floor heating", CONF_CONTROL_ENTITY: "input_boolean.floor"},
+    )
+    assert result["errors"] == {CONF_NAME: "name_in_use", CONF_CONTROL_ENTITY: "control_in_use"}
+
+
+async def test_reconfigure_device(hass: HomeAssistant) -> None:
+    entry = await _setup(hass, FLOOR)
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, SUBENTRY_DEVICE),
+        context={"source": SOURCE_RECONFIGURE, "subentry_id": "floor"},
+    )
+    assert result["type"] is FlowResultType.FORM
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        {**NEW_DEVICE, CONF_NAME: "Floor heating", CONF_CONTROL_ENTITY: "input_boolean.floor"},
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    await hass.async_block_till_done()
+    assert entry.subentries["floor"].data[CONF_NOMINAL_POWER] == 1000
+    assert hass.states.get("sensor.floor_heating_state").attributes["nominal_power"] == 1000
