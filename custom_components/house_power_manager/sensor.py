@@ -135,11 +135,11 @@ DEVICE_STATE = SensorEntityDescription(
 
 
 class GrantedPowerSensor(HpmDeviceEntity, SensorEntity):
-    """Measured power while granted (nominal without a power sensor), else 0."""
+    """Power the device draws: its power sensor, else its declared power while it is on."""
 
     @property
     def native_value(self) -> float:
-        return self.coordinator.granted_power(self._device)
+        return self.coordinator.device_power(self._device)
 
 
 class DeviceStateSensor(HpmDeviceEntity, SensorEntity):

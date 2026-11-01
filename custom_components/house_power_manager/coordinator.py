@@ -148,9 +148,23 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         """Restore requests and grants from before the restart."""
         stored = await self._store.async_load() or {}
         self.enabled = stored.get("enabled", True)
-        for device_id, data in stored.get("devices", {}).items():
-            if device := self.devices.get(device_id):
-                device.restore(data)
+        stored_devices = stored.get("devices", {})
+        for device in self.devices.values():
+            if device.id in stored_devices:
+                device.restore(stored_devices[device.id])
+            else:  # just added: a device that is already on keeps running
+                self._take_over(device)
+
+    def _take_over(self, device: ManagedDevice) -> None:
+        """Follow the device's current on/off state instead of switching it."""
+        state = self.hass.states.get(device.control_entity)
+        is_on = _known(state) and state.state != STATE_OFF
+        if is_on and not device.granted:
+            device.changed_at = dt_util.utcnow().timestamp()
+            device.reason = Reason.MANUAL
+        device.granted = is_on
+        device.requested = device.requested or is_on
+        device.commanded_at = None
 
     @callback
     def async_start(self) -> None:
@@ -371,15 +385,21 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         except ValueError:
             return None
 
-    def granted_power(self, device: ManagedDevice) -> float:
-        if not device.managed or not device.granted:
-            return 0.0
+    def _is_on(self, device: ManagedDevice) -> bool:
+        """The control entity is on; while it can't be read, the grant is assumed."""
+        state = self.hass.states.get(device.control_entity)
+        return state.state != STATE_OFF if _known(state) else device.granted
+
+    def device_power(self, device: ManagedDevice) -> float:
+        """W the device draws: its power sensor, else its declared power while it is on."""
         measured = self.measured_power(device)
-        return device.nominal_power if measured is None else measured
+        if measured is not None:
+            return measured
+        return device.nominal_power if self._is_on(device) else 0.0
 
     @property
     def managed_load(self) -> float:
-        return sum(self.granted_power(device) for device in self.devices.values())
+        return sum(self.device_power(d) for d in self.devices.values() if d.managed)
 
     # ---- Changes from entities, services and the UI ----------------------
 
@@ -440,11 +460,7 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         _LOGGER.info("%s %s", device.name, "managed" if managed else "overridden: left alone")
         device.managed = managed
         if managed:
-            state = self.hass.states.get(device.control_entity)
-            is_on = _known(state) and state.state != STATE_OFF
-            device.granted = is_on
-            device.requested = device.requested or is_on
-            device.commanded_at = None
+            self._take_over(device)
         self._save()
         self.async_update_listeners()
         self._refresh_now()

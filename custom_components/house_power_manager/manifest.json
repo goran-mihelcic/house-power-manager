@@ -1,6 +1,7 @@
 {
   "domain": "house_power_manager",
   "name": "House Power Manager",
+  "categories": ["energy"],
   "codeowners": ["@goran-mihelcic"],
   "config_flow": true,
   "dependencies": [],
@@ -10,5 +11,5 @@
   "issue_tracker": "https://github.com/goran-mihelcic/house-power-manager/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.2.2"
+  "version": "0.2.3"
 }

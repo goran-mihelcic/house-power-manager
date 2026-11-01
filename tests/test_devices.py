@@ -69,6 +69,42 @@ async def test_device_entities(hass: HomeAssistant) -> None:
     assert attrs["control_entity"] == "input_boolean.floor"
 
 
+async def test_power_without_sensor_is_declared_power_while_on(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    await _setup(hass, FLOOR)
+    await _switch(hass, "switch.floor_heating_requested", True)
+    assert float(_state(hass, "sensor.floor_heating_granted_power")) == 2000
+
+    # Left alone and running: still 2000 W, not 0; not part of the managed load
+    await _switch(hass, "switch.floor_heating_managed", False)
+    await _elapse(hass, freezer, 6)
+    assert float(_state(hass, "sensor.floor_heating_granted_power")) == 2000
+    assert float(_state(hass, "sensor.hpm_managed_load")) == 0
+
+    await _by_hand(hass, "input_boolean.floor", False)
+    await _elapse(hass, freezer, 6)
+    assert float(_state(hass, "sensor.floor_heating_granted_power")) == 0
+
+
+async def test_power_sensor_is_preferred(hass: HomeAssistant) -> None:
+    hass.states.async_set("sensor.floor_power", "1.5", {"unit_of_measurement": "kW"})
+    await _setup(hass, {**FLOOR, "data": {**FLOOR["data"], "power_sensor": "sensor.floor_power"}})
+    await _switch(hass, "switch.floor_heating_requested", True)
+    assert float(_state(hass, "sensor.floor_heating_granted_power")) == 1500
+    assert float(_state(hass, "sensor.hpm_managed_load")) == 1500
+
+
+async def test_device_already_on_when_added_is_followed(hass: HomeAssistant) -> None:
+    await setup_booleans(hass, "floor", on=("floor",))
+    set_grid(hass, 3000)
+    await setup_hpm(hass, [FLOOR])
+    assert _state(hass, "input_boolean.floor") == "on"
+    assert _state(hass, "switch.floor_heating_requested") == "on"
+    assert _state(hass, "sensor.floor_heating_state") == "running"
+    assert float(_state(hass, "sensor.floor_heating_granted_power")) == 2000
+
+
 async def test_request_is_granted_and_switches_the_device(hass: HomeAssistant) -> None:
     await _setup(hass, FLOOR)
     restored = async_capture_events(hass, EVENT_DEVICE_RESTORED)

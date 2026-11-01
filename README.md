@@ -42,7 +42,7 @@ Settings → Devices & services → **House Power Manager** → **Add managed de
 | Minimum on / off time | Protects compressors and avoids churn. Minimum on time is ignored when import exceeds the hard limit. |
 | Latency | Seconds until a command shows in the grid measurement. Use 30–60 s for cloud devices (LG ThinQ). |
 
-> **Switching a device by hand is followed, not fought.** If a managed device is switched on or off outside the integration (wall switch, app, another automation), that becomes its new request and grant. A device switched on by hand still counts in balancing: when the measurement shows import over target it can be shed like any other, and it comes back on once there is room. Turn the device's **Managed** switch off to keep the integration from ever switching it.
+> **Switching a device by hand is followed, not fought.** If a managed device is switched on or off outside the integration (wall switch, app, another automation), that becomes its new request and grant. A device that is already on when you add it keeps running. A device switched on by hand still counts in balancing: when the measurement shows import over target it can be shed like any other, and it comes back on once there is room. Turn the device's **Managed** switch off to keep the integration from ever switching it.
 
 ### How balancing works
 
@@ -62,7 +62,7 @@ House Power Manager device:
 |---|---|
 | `sensor.hpm_grid_import` | Normalised grid power in W: positive importing, negative exporting |
 | `sensor.hpm_headroom` | `target − grid_import`; negative when over target |
-| `sensor.hpm_managed_load` | Power of granted managed devices |
+| `sensor.hpm_managed_load` | Power drawn by managed devices |
 | `sensor.hpm_status` | `normal` / `limiting` (over target) / `emergency` (over limit) / `sensor_fault` |
 | `number.hpm_import_limit`, `number.hpm_margin` | Runtime-adjustable limit and margin |
 | `switch.hpm_enabled` | Master switch |
@@ -73,7 +73,7 @@ Each managed device (`<name>` from its name):
 |---|---|
 | `switch.<name>_requested` | Ask for power. Turn this on instead of the device itself. |
 | `binary_sensor.<name>_granted` | Power granted; attribute `reason` |
-| `sensor.<name>_granted_power` | Measured (or nominal) power while granted, else 0 |
+| `sensor.<name>_granted_power` | Power the device draws: its power sensor, or its nominal power while it is on (0 when off) |
 | `sensor.<name>_state` | `idle` / `running` / `shed` / `override`; attributes priority, reason, last change |
 | `switch.<name>_managed` | Off: the device is left alone (its power still counts in grid import) |
 
