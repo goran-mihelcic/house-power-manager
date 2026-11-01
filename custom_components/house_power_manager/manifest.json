@@ -1,0 +1,14 @@
+{
+  "domain": "house_power_manager",
+  "name": "House Power Manager",
+  "codeowners": ["@goran-mihelcic"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/goran-mihelcic/house-power-manager",
+  "integration_type": "hub",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/goran-mihelcic/house-power-manager/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}

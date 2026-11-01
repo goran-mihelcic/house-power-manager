@@ -1,0 +1,98 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "House Power Manager",
+        "description": "Keeps grid import below the connection limit. Managed devices are added later.",
+        "data": {
+          "grid_sensor": "Grid power sensor",
+          "sign_convention": "Sign convention",
+          "import_limit": "Import limit",
+          "margin": "Margin",
+          "update_interval": "Update interval",
+          "fault_timeout": "Sensor fault timeout"
+        },
+        "data_description": {
+          "grid_sensor": "Power measured on the main connection (W, kW or MW). With PV this is import minus export, not house load.",
+          "sign_convention": "How the sensor reports power drawn from the grid.",
+          "import_limit": "Grid import at which the limiter cuts supply.",
+          "margin": "Import is kept this far below the limit. Target = limit − margin.",
+          "update_interval": "Re-check this often even when the sensor does not change.",
+          "fault_timeout": "Without a fresh reading for this long the sensor is treated as faulty."
+        }
+      }
+    },
+    "error": {
+      "sensor_not_found": "The sensor does not exist.",
+      "unsupported_unit": "The sensor must report power in W, kW or MW.",
+      "margin_too_large": "The margin must be smaller than the import limit."
+    },
+    "abort": {
+      "single_instance_allowed": "House Power Manager is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "House Power Manager",
+        "data": {
+          "grid_sensor": "Grid power sensor",
+          "sign_convention": "Sign convention",
+          "import_limit": "Import limit",
+          "margin": "Margin",
+          "update_interval": "Update interval",
+          "fault_timeout": "Sensor fault timeout"
+        },
+        "data_description": {
+          "grid_sensor": "Power measured on the main connection (W, kW or MW). With PV this is import minus export, not house load.",
+          "sign_convention": "How the sensor reports power drawn from the grid.",
+          "import_limit": "Grid import at which the limiter cuts supply.",
+          "margin": "Import is kept this far below the limit. Target = limit − margin.",
+          "update_interval": "Re-check this often even when the sensor does not change.",
+          "fault_timeout": "Without a fresh reading for this long the sensor is treated as faulty."
+        }
+      }
+    },
+    "error": {
+      "sensor_not_found": "The sensor does not exist.",
+      "unsupported_unit": "The sensor must report power in W, kW or MW.",
+      "margin_too_large": "The margin must be smaller than the import limit."
+    }
+  },
+  "selector": {
+    "sign_convention": {
+      "options": {
+        "import_positive": "Positive while importing from the grid",
+        "import_negative": "Negative while importing from the grid"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "grid_import": { "name": "Grid import" },
+      "headroom": { "name": "Headroom" },
+      "managed_load": { "name": "Managed load" },
+      "status": {
+        "name": "Status",
+        "state": {
+          "normal": "Normal",
+          "limiting": "Limiting",
+          "emergency": "Emergency",
+          "sensor_fault": "Sensor fault"
+        }
+      }
+    },
+    "number": {
+      "import_limit": { "name": "Import limit" },
+      "margin": { "name": "Margin" }
+    },
+    "switch": {
+      "enabled": { "name": "Enabled" }
+    }
+  },
+  "exceptions": {
+    "margin_too_large": {
+      "message": "The margin must be smaller than the import limit."
+    }
+  }
+}
