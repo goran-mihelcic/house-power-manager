@@ -236,3 +236,74 @@ def test_device_switched_by_hand_is_not_shed_in_advance() -> None:
     assert decide(grid(1000), [floor, dev("pool", 9, 500)], NOW) == []
     # Once it shows and import is over target, it is balanced like any other device
     assert changes(decide(grid(8000), [floor], NOW + 10)) == [("floor", False, Reason.EMERGENCY)]
+
+
+# ---- Devices sharing a supply ------------------------------------------
+
+
+def test_group_is_shed_together() -> None:
+    # Two indoor units on one outdoor unit; 300 W over target
+    devices = [
+        on("bedroom_ac", 2, 800, group="outdoor"),
+        on("living_ac", 2, 1200, group="outdoor"),
+        on("floor", 5, 2000),
+    ]
+    assert changes(decide(grid(7500), devices, NOW)) == [
+        ("bedroom_ac", False, Reason.OVER_TARGET),
+        ("living_ac", False, Reason.OVER_TARGET),
+    ]
+
+
+def test_group_is_as_important_as_its_most_important_member() -> None:
+    devices = [
+        on("bedroom_ac", 1, 800, group="outdoor"),
+        on("living_ac", 9, 1200, group="outdoor"),
+        on("floor", 5, 2000),
+    ]
+    assert changes(decide(grid(7500), devices, NOW)) == [("floor", False, Reason.OVER_TARGET)]
+
+
+def test_group_member_with_nothing_measured_still_goes_off_with_the_group() -> None:
+    devices = [
+        on("bedroom_ac", 2, 800, group="outdoor", measured_power=0),
+        on("living_ac", 2, 1200, group="outdoor", measured_power=1100),
+    ]
+    assert [a.device_id for a in decide(grid(7500), devices, NOW)] == ["bedroom_ac", "living_ac"]
+
+
+def test_group_min_on_time_protects_all_members() -> None:
+    devices = [
+        on("bedroom_ac", 2, 800, group="outdoor", min_on=300, changed_at=NOW - 60),
+        on("living_ac", 2, 1200, group="outdoor"),
+        on("floor", 5, 2000),
+    ]
+    assert changes(decide(grid(7500), devices, NOW)) == [("floor", False, Reason.OVER_TARGET)]
+
+
+def test_group_members_are_restored_one_by_one() -> None:
+    devices = [
+        dev("bedroom_ac", 2, 800, group="outdoor"),
+        dev("living_ac", 3, 1200, group="outdoor"),
+    ]
+    assert changes(decide(grid(1000), devices, NOW, 200)) == [("living_ac", True, Reason.HEADROOM)]
+
+
+def test_preemption_sheds_the_whole_group() -> None:
+    devices = [
+        on("bedroom_ac", 1, 800, group="outdoor"),
+        on("living_ac", 1, 1200, group="outdoor"),
+        dev("floor", 9, 2500),
+    ]
+    assert changes(decide(grid(6000), devices, NOW, 200)) == [
+        ("bedroom_ac", False, Reason.PREEMPTED),
+        ("living_ac", False, Reason.PREEMPTED),
+    ]
+
+
+def test_no_preemption_within_a_group() -> None:
+    # The waiting unit must not switch off its own outdoor unit's other indoor unit
+    devices = [
+        on("bedroom_ac", 1, 2000, group="outdoor"),
+        dev("living_ac", 9, 2500, group="outdoor"),
+    ]
+    assert decide(grid(6000), devices, NOW, 200) == []

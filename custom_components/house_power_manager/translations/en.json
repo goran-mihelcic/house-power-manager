@@ -21,13 +21,33 @@
           "hysteresis": "A device is restored only when headroom exceeds its power by this much, so it isn't shed again straight away.",
           "update_interval": "Re-check this often even when the sensor does not change.",
           "fault_timeout": "Without a fresh reading for this long the sensor is treated as faulty."
+        },
+        "sections": {
+          "notifications": {
+            "name": "Notifications",
+            "description": "Sent to the notify targets below. Messages are also written to the log.",
+            "data": {
+              "notify_targets": "Notify targets",
+              "notify_shed": "Device switched off because of overload",
+              "notify_limit": "Import close to the limit",
+              "warning_margin": "Warning margin"
+            },
+            "data_description": {
+              "notify_targets": "A notify action such as mobile_app_my_phone, or a notify entity such as notify.family.",
+              "notify_shed": "When import goes over the target or the limit and devices are switched off.",
+              "notify_limit": "When import comes within the warning margin of the limit. Sent again only after import was back under the target.",
+              "warning_margin": "Import above limit − this counts as close. At most the margin, so normal balancing doesn't trigger it."
+            }
+          }
         }
       }
     },
     "error": {
       "sensor_not_found": "The sensor does not exist.",
       "unsupported_unit": "The sensor must report power in W, kW or MW.",
-      "margin_too_large": "The margin must be smaller than the import limit."
+      "margin_too_large": "The margin must be smaller than the import limit.",
+      "unknown_notify": "No notify action or notify entity with this name.",
+      "warning_below_target": "The warning margin must not be larger than the margin."
     },
     "abort": {
       "single_instance_allowed": "House Power Manager is already set up."
@@ -54,13 +74,33 @@
           "hysteresis": "A device is restored only when headroom exceeds its power by this much, so it isn't shed again straight away.",
           "update_interval": "Re-check this often even when the sensor does not change.",
           "fault_timeout": "Without a fresh reading for this long the sensor is treated as faulty."
+        },
+        "sections": {
+          "notifications": {
+            "name": "Notifications",
+            "description": "Sent to the notify targets below. Messages are also written to the log.",
+            "data": {
+              "notify_targets": "Notify targets",
+              "notify_shed": "Device switched off because of overload",
+              "notify_limit": "Import close to the limit",
+              "warning_margin": "Warning margin"
+            },
+            "data_description": {
+              "notify_targets": "A notify action such as mobile_app_my_phone, or a notify entity such as notify.family.",
+              "notify_shed": "When import goes over the target or the limit and devices are switched off.",
+              "notify_limit": "When import comes within the warning margin of the limit. Sent again only after import was back under the target.",
+              "warning_margin": "Import above limit − this counts as close. At most the margin, so normal balancing doesn't trigger it."
+            }
+          }
         }
       }
     },
     "error": {
       "sensor_not_found": "The sensor does not exist.",
       "unsupported_unit": "The sensor must report power in W, kW or MW.",
-      "margin_too_large": "The margin must be smaller than the import limit."
+      "margin_too_large": "The margin must be smaller than the import limit.",
+      "unknown_notify": "No notify action or notify entity with this name.",
+      "warning_below_target": "The warning margin must not be larger than the margin."
     }
   },
   "config_subentries": {
@@ -80,6 +120,7 @@
             "control_entity": "Control entity",
             "nominal_power": "Nominal power",
             "power_sensor": "Power sensor",
+            "supply_group": "Shared power supply",
             "min_on_time": "Minimum on time",
             "min_off_time": "Minimum off time",
             "latency": "Latency"
@@ -89,6 +130,7 @@
             "control_entity": "The switch (or climate, water heater, fan, light) turned on when power is granted and off when it is shed.",
             "nominal_power": "Power drawn when running. Used to decide whether there is room to switch it on.",
             "power_sensor": "Optional. The device's real consumption, used instead of the nominal power when deciding what to shed.",
+            "supply_group": "Optional. Devices with the same name here share one supply, such as the indoor units of one multi-split outdoor unit, and are switched off together. Pick a name already in use or type a new one.",
             "min_on_time": "Not shed sooner than this after being switched on, unless import exceeds the hard limit.",
             "min_off_time": "Not switched on again sooner than this after being switched off.",
             "latency": "How long until a command shows in the grid measurement. Use more for cloud devices."
@@ -102,6 +144,7 @@
             "control_entity": "Control entity",
             "nominal_power": "Nominal power",
             "power_sensor": "Power sensor",
+            "supply_group": "Shared power supply",
             "min_on_time": "Minimum on time",
             "min_off_time": "Minimum off time",
             "latency": "Latency"
@@ -111,6 +154,7 @@
             "control_entity": "The switch (or climate, water heater, fan, light) turned on when power is granted and off when it is shed.",
             "nominal_power": "Power drawn when running. Used to decide whether there is room to switch it on.",
             "power_sensor": "Optional. The device's real consumption, used instead of the nominal power when deciding what to shed.",
+            "supply_group": "Optional. Devices with the same name here share one supply, such as the indoor units of one multi-split outdoor unit, and are switched off together. Pick a name already in use or type a new one.",
             "min_on_time": "Not shed sooner than this after being switched on, unless import exceeds the hard limit.",
             "min_off_time": "Not switched on again sooner than this after being switched off.",
             "latency": "How long until a command shows in the grid measurement. Use more for cloud devices."
@@ -139,12 +183,20 @@
   },
   "entity": {
     "binary_sensor": {
-      "granted": { "name": "Granted" }
+      "granted": {
+        "name": "Granted"
+      }
     },
     "sensor": {
-      "grid_import": { "name": "Grid import" },
-      "headroom": { "name": "Headroom" },
-      "managed_load": { "name": "Managed load" },
+      "grid_import": {
+        "name": "Grid import"
+      },
+      "headroom": {
+        "name": "Headroom"
+      },
+      "managed_load": {
+        "name": "Managed load"
+      },
       "status": {
         "name": "Status",
         "state": {
@@ -154,7 +206,9 @@
           "sensor_fault": "Sensor fault"
         }
       },
-      "granted_power": { "name": "Granted power" },
+      "granted_power": {
+        "name": "Granted power"
+      },
       "device_state": {
         "name": "State",
         "state": {
@@ -167,13 +221,23 @@
       }
     },
     "number": {
-      "import_limit": { "name": "Import limit" },
-      "margin": { "name": "Margin" }
+      "import_limit": {
+        "name": "Import limit"
+      },
+      "margin": {
+        "name": "Margin"
+      }
     },
     "switch": {
-      "enabled": { "name": "Enabled" },
-      "requested": { "name": "Requested" },
-      "managed": { "name": "Managed" }
+      "enabled": {
+        "name": "Enabled"
+      },
+      "requested": {
+        "name": "Requested"
+      },
+      "managed": {
+        "name": "Managed"
+      }
     }
   },
   "services": {

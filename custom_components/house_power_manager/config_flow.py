@@ -14,6 +14,7 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT, CONF_NAME
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.data_entry_flow import section
 from homeassistant.helpers import selector as sel
 import voluptuous as vol
 
@@ -30,10 +31,16 @@ from .const import (
     CONF_MIN_OFF_TIME,
     CONF_MIN_ON_TIME,
     CONF_NOMINAL_POWER,
+    CONF_NOTIFICATIONS,
+    CONF_NOTIFY_LIMIT,
+    CONF_NOTIFY_SHED,
+    CONF_NOTIFY_TARGETS,
     CONF_POWER_SENSOR,
     CONF_PRIORITY,
     CONF_SIGN,
+    CONF_SUPPLY_GROUP,
     CONF_UPDATE_INTERVAL,
+    CONF_WARNING_MARGIN,
     CONTROL_DOMAINS,
     DEFAULTS,
     DEVICE_DEFAULTS,
@@ -73,23 +80,50 @@ SCHEMA = vol.Schema(
         vol.Required(CONF_HYSTERESIS): _number(0, 5000, 50, "W"),
         vol.Required(CONF_UPDATE_INTERVAL): _number(1, 60, 1, "s"),
         vol.Required(CONF_FAULT_TIMEOUT): _number(10, 600, 5, "s"),
+        vol.Required(CONF_NOTIFICATIONS): section(
+            vol.Schema(
+                {
+                    vol.Optional(CONF_NOTIFY_TARGETS): sel.TextSelector(
+                        sel.TextSelectorConfig(multiple=True)
+                    ),
+                    vol.Required(CONF_NOTIFY_SHED): sel.BooleanSelector(),
+                    vol.Required(CONF_NOTIFY_LIMIT): sel.BooleanSelector(),
+                    vol.Required(CONF_WARNING_MARGIN): _number(0, 5000, 50, "W"),
+                }
+            ),
+            {"collapsed": False},
+        ),
     }
 )
 
-DEVICE_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_NAME): sel.TextSelector(),
-        vol.Required(CONF_PRIORITY): _number(1, 100, 1),
-        vol.Required(CONF_CONTROL_ENTITY): sel.EntitySelector(
-            sel.EntitySelectorConfig(domain=CONTROL_DOMAINS)
-        ),
-        vol.Required(CONF_NOMINAL_POWER): _number(1, 50000, 1, "W"),
-        vol.Optional(CONF_POWER_SENSOR): _power_sensor(),
-        vol.Required(CONF_MIN_ON_TIME): _number(0, 86400, 1, "s"),
-        vol.Required(CONF_MIN_OFF_TIME): _number(0, 86400, 1, "s"),
-        vol.Required(CONF_LATENCY): _number(0, 600, 1, "s"),
-    }
-)
+
+def _device_schema(entry: ConfigEntry, subentry_id: str | None) -> vol.Schema:
+    """The device form; the supply field offers the supply names already in use."""
+    supplies: dict[str, str] = {}  # one entry per supply: names match regardless of case
+    for sub in entry.subentries.values():
+        if sub.subentry_id != subentry_id and (name := sub.data.get(CONF_SUPPLY_GROUP, "").strip()):
+            supplies.setdefault(name.casefold(), name)
+    return vol.Schema(
+        {
+            vol.Required(CONF_NAME): sel.TextSelector(),
+            vol.Required(CONF_PRIORITY): _number(1, 100, 1),
+            vol.Required(CONF_CONTROL_ENTITY): sel.EntitySelector(
+                sel.EntitySelectorConfig(domain=CONTROL_DOMAINS)
+            ),
+            vol.Required(CONF_NOMINAL_POWER): _number(1, 50000, 1, "W"),
+            vol.Optional(CONF_POWER_SENSOR): _power_sensor(),
+            vol.Optional(CONF_SUPPLY_GROUP): sel.SelectSelector(
+                sel.SelectSelectorConfig(
+                    options=sorted(supplies.values(), key=str.casefold),
+                    custom_value=True,
+                    mode=sel.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required(CONF_MIN_ON_TIME): _number(0, 86400, 1, "s"),
+            vol.Required(CONF_MIN_OFF_TIME): _number(0, 86400, 1, "s"),
+            vol.Required(CONF_LATENCY): _number(0, 600, 1, "s"),
+        }
+    )
 
 
 def _power_unit_error(hass: HomeAssistant, entity_id: str) -> str | None:
@@ -107,6 +141,20 @@ def _validate(hass: HomeAssistant, user_input: dict[str, Any]) -> dict[str, str]
         errors[CONF_GRID_SENSOR] = error
     if user_input[CONF_MARGIN] >= user_input[CONF_IMPORT_LIMIT]:
         errors[CONF_MARGIN] = "margin_too_large"
+    notifications = user_input[CONF_NOTIFICATIONS]
+    targets = [
+        t.strip().removeprefix("notify.") for t in notifications.get(CONF_NOTIFY_TARGETS) or []
+    ]
+    notifications[CONF_NOTIFY_TARGETS] = [t for t in targets if t]
+    for target in notifications[CONF_NOTIFY_TARGETS]:
+        # A notify action (notify.mobile_app_x) or a notify entity (e.g. a notify group)
+        if not hass.services.has_service("notify", target) and (
+            hass.states.get(f"notify.{target}") is None
+        ):
+            errors[CONF_NOTIFY_TARGETS] = "unknown_notify"
+    if notifications[CONF_WARNING_MARGIN] > user_input[CONF_MARGIN]:
+        # The warning would go off during normal balancing, below the target
+        errors[CONF_WARNING_MARGIN] = "warning_below_target"
     return errors
 
 
@@ -124,6 +172,14 @@ def _validate_device(
     if (sensor := user_input.get(CONF_POWER_SENSOR)) and (error := _power_unit_error(hass, sensor)):
         errors[CONF_POWER_SENSOR] = error
     return errors
+
+
+def _clean_supply(user_input: dict[str, Any]) -> None:
+    """An empty supply name means the device has its own supply."""
+    if supply := (user_input.get(CONF_SUPPLY_GROUP) or "").strip():
+        user_input[CONF_SUPPLY_GROUP] = supply
+    else:
+        user_input.pop(CONF_SUPPLY_GROUP, None)
 
 
 class HpmConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -183,6 +239,7 @@ class DeviceSubentryFlow(ConfigSubentryFlow):
         errors: dict[str, str] = {}
         if user_input is not None:
             errors = _validate_device(self.hass, self._get_entry(), user_input, None)
+            _clean_supply(user_input)
             if not errors:
                 name = user_input.pop(CONF_NAME).strip()
                 return self.async_create_entry(
@@ -191,7 +248,8 @@ class DeviceSubentryFlow(ConfigSubentryFlow):
         return self.async_show_form(
             step_id="user",
             data_schema=self.add_suggested_values_to_schema(
-                DEVICE_SCHEMA, {**DEVICE_DEFAULTS, **(user_input or {})}
+                _device_schema(self._get_entry(), None),
+                {**DEVICE_DEFAULTS, **(user_input or {})},
             ),
             errors=errors,
         )
@@ -204,6 +262,7 @@ class DeviceSubentryFlow(ConfigSubentryFlow):
         errors: dict[str, str] = {}
         if user_input is not None:
             errors = _validate_device(self.hass, entry, user_input, subentry.subentry_id)
+            _clean_supply(user_input)
             if not errors:
                 name = user_input.pop(CONF_NAME).strip()
                 # Replace rather than merge, so a cleared power sensor is removed
@@ -213,7 +272,7 @@ class DeviceSubentryFlow(ConfigSubentryFlow):
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=self.add_suggested_values_to_schema(
-                DEVICE_SCHEMA, {**current, **(user_input or {})}
+                _device_schema(entry, subentry.subentry_id), {**current, **(user_input or {})}
             ),
             errors=errors,
         )

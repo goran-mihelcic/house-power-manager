@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from datetime import timedelta
 import logging
 from typing import Any, TypeGuard
@@ -41,9 +42,14 @@ from .const import (
     CONF_HYSTERESIS,
     CONF_IMPORT_LIMIT,
     CONF_MARGIN,
+    CONF_NOTIFICATIONS,
+    CONF_NOTIFY_LIMIT,
+    CONF_NOTIFY_SHED,
+    CONF_NOTIFY_TARGETS,
     CONF_PRIORITY,
     CONF_SIGN,
     CONF_UPDATE_INTERVAL,
+    CONF_WARNING_MARGIN,
     DEBOUNCE_SECONDS,
     DEFAULT_HYSTERESIS,
     DOMAIN,
@@ -54,6 +60,7 @@ from .const import (
     FAULT_UNAVAILABLE,
     FAULT_UNSUPPORTED_UNIT,
     LIVE_OPTIONS,
+    NOTIFICATION_DEFAULTS,
     RETRY_SECONDS,
     SIGN_IMPORT_POSITIVE,
     SUBENTRY_DEVICE,
@@ -95,6 +102,10 @@ def _reload_relevant(entry: ConfigEntry) -> dict[str, tuple[str, dict[str, Any]]
     }
 
 
+def _notifications(options: Mapping[str, Any]) -> dict[str, Any]:
+    return {**NOTIFICATION_DEFAULTS, **options.get(CONF_NOTIFICATIONS, {})}
+
+
 class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
     """Evaluates grid import on every sensor update (debounced) and on a periodic tick."""
 
@@ -120,6 +131,8 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         self.limit = float(options[CONF_IMPORT_LIMIT])
         self.margin = float(options[CONF_MARGIN])
         self.hysteresis = float(options.get(CONF_HYSTERESIS, DEFAULT_HYSTERESIS))
+        self.notifications = _notifications(options)
+        self._limit_warned = False  # re-armed once import is back under target
         self.enabled = True
         self.devices: dict[str, ManagedDevice] = {
             subentry_id: ManagedDevice.from_subentry(sub)
@@ -241,6 +254,7 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
     async def _async_update_data(self) -> GridSnapshot:
         async with self._lock:
             snapshot = self._evaluate()
+            self._check_limit_warning(snapshot)
             if self.enabled:
                 now = dt_util.utcnow().timestamp()
                 # Re-apply existing grants first (e.g. restored after a restart), so the
@@ -301,6 +315,7 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
             self._apply(self.devices[action.device_id], action, grid, now)
         if actions:
             self._save()
+            self._notify_overload(actions, grid)
         return bool(actions)
 
     def _apply(self, device: ManagedDevice, action: Action, grid: GridSnapshot, now: float) -> None:
@@ -332,6 +347,71 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
                 "grid_import": grid.grid_import,
             },
         )
+
+    # ---- Notifications ---------------------------------------------------
+
+    def _notify_overload(self, actions: list[Action], grid: GridSnapshot) -> None:
+        """One message for the devices switched off in this cycle because of overload."""
+        shed = [a for a in actions if a.reason in (Reason.OVER_TARGET, Reason.EMERGENCY)]
+        if not shed or not self.notifications[CONF_NOTIFY_SHED]:
+            return
+        names = ", ".join(self.devices[a.device_id].name for a in shed)
+        if any(a.reason is Reason.EMERGENCY for a in shed):
+            cause = f"over the {self.limit:.0f} W limit"
+        else:
+            cause = f"over the {grid.target:.0f} W target"
+        self._notify(f"Switched off {names}: grid import {grid.grid_import:.0f} W is {cause}.")
+
+    def _check_limit_warning(self, grid: GridSnapshot) -> None:
+        """Warn once when import comes close to the limit; again after it was under target."""
+        if grid.grid_import is None:
+            return
+        if grid.grid_import <= grid.target:
+            self._limit_warned = False
+            return
+        level = self.limit - self.notifications[CONF_WARNING_MARGIN]
+        if self._limit_warned or grid.grid_import < level:
+            return
+        self._limit_warned = True
+        if self.notifications[CONF_NOTIFY_LIMIT]:
+            self._notify(
+                f"Grid import {grid.grid_import:.0f} W is close to the {self.limit:.0f} W limit."
+            )
+
+    @callback
+    def _notify(self, message: str) -> None:
+        _LOGGER.warning("%s", message)
+        targets = self.notifications[CONF_NOTIFY_TARGETS]
+        if targets:
+            self.config_entry.async_create_background_task(
+                self.hass, self._async_send(targets, message), "house_power_manager notify"
+            )
+
+    async def _async_send(self, targets: list[str], message: str) -> None:
+        for target in targets:
+            name = target.removeprefix("notify.")
+            if self.hass.services.has_service("notify", name):
+                # A notify action, e.g. notify.mobile_app_my_phone
+                service = name
+                data = {"title": "House Power Manager", "message": message}
+            else:
+                # A notify entity, e.g. a notify group helper: notify.send_message
+                service = "send_message"
+                data = {"entity_id": f"notify.{name}", "message": f"House Power Manager: {message}"}
+            try:
+                await self.hass.services.async_call("notify", service, data, blocking=True)
+            except Exception as err:  # a broken notifier must not stop balancing
+                _LOGGER.warning("notify.%s failed: %s", name, err)
+
+    def supply_partners(self, device: ManagedDevice) -> list[str]:
+        """Names of the other devices on the same power supply."""
+        if not device.supply_key:
+            return []
+        return [
+            other.name
+            for other in self.devices.values()
+            if other is not device and other.supply_key == device.supply_key
+        ]
 
     async def _async_enforce(self, now: float) -> None:
         """Bring each managed control entity to its grant, retrying slow devices."""
@@ -405,7 +485,7 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
 
     @callback
     def apply_entry_update(self, entry: HpmConfigEntry) -> bool:
-        """Take limit, margin, hysteresis and priorities live. False when a reload is needed."""
+        """Take limits, notifications and priorities live. False when a reload is needed."""
         options = entry.options
         changed = {
             k
@@ -418,6 +498,7 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         self.limit = float(options[CONF_IMPORT_LIMIT])
         self.margin = float(options[CONF_MARGIN])
         self.hysteresis = float(options.get(CONF_HYSTERESIS, DEFAULT_HYSTERESIS))
+        self.notifications = _notifications(options)
         for subentry_id, device in self.devices.items():
             device.priority = int(entry.subentries[subentry_id].data[CONF_PRIORITY])
         self._refresh_now()

@@ -161,6 +161,8 @@ class DeviceStateSensor(HpmDeviceEntity, SensorEntity):
             "requested": device.requested,
             "granted": device.granted,
             "managed": device.managed,
+            "supply_group": device.supply_group,
+            "shares_power_with": self.coordinator.supply_partners(device),
             "reason": device.reason,
             "last_change": (
                 dt_util.utc_from_timestamp(changed_at).isoformat() if changed_at else None

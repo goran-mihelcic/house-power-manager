@@ -13,6 +13,8 @@ The coordinator measures grid import, describes each managed device as a
 - Changes made within a device's latency are not in the measurement yet. Their
   power is accounted for when shedding, and nothing is restored until they
   have settled.
+- Devices sharing a supply (one group) are shed together, as important as
+  their most important running member. They are restored one by one.
 """
 
 from __future__ import annotations
@@ -111,6 +113,9 @@ class DeviceInput:
     # Switched outside the integration: its power isn't anticipated, so it is only shed
     # once the measurement shows import over target
     followed: bool = False
+    # Devices with the same group share a power supply, e.g. the indoor units of one
+    # multi-split outdoor unit: they are shed together
+    group: str | None = None
 
     def settling(self, now: float) -> bool:
         """A recent change or command may not show in the measurement yet."""
@@ -146,9 +151,38 @@ class Action:
     reason: Reason
 
 
-def _shed_order(devices: Iterable[DeviceInput], now: float) -> list[DeviceInput]:
-    """Least important first; among equals the largest load, so fewer devices go off."""
-    return sorted(devices, key=lambda d: (d.priority, -d.load(now), d.id))
+@dataclass(frozen=True, slots=True)
+class _Unit:
+    """What is shed in one go: a device, or the running devices sharing a supply."""
+
+    devices: tuple[DeviceInput, ...]
+
+    @property
+    def priority(self) -> int:
+        """As important as its most important member."""
+        return max(d.priority for d in self.devices)
+
+    @property
+    def group(self) -> str | None:
+        return self.devices[0].group
+
+    def load(self, now: float) -> float:
+        return sum(d.load(now) for d in self.devices)
+
+    def on_long_enough(self, now: float) -> bool:
+        return all(d.on_long_enough(now) for d in self.devices)
+
+
+def _units(devices: Iterable[DeviceInput], now: float) -> list[_Unit]:
+    """Shed order: least important first; among equals the largest, so fewer go off."""
+    members: dict[str, list[DeviceInput]] = {}
+    for device in devices:
+        members.setdefault(device.group or device.id, []).append(device)
+    units = [_Unit(tuple(group)) for group in members.values()]
+    return sorted(
+        (u for u in units if u.load(now) > 0),
+        key=lambda u: (u.priority, -u.load(now), min(d.id for d in u.devices)),
+    )
 
 
 def decide(
@@ -172,16 +206,17 @@ def decide(
     # Headroom once changes not yet in the measurement have taken effect
     headroom = grid.headroom - sum(d.unseen(now) for d in devices if d.id not in revoked)
     headroom += sum(d.load(now) for d in devices if d.id in revoked)
-    running = [d for d in devices if d.granted and d.id not in revoked and d.load(now) > 0]
+    running = _units((d for d in devices if d.granted and d.id not in revoked), now)
 
     if headroom < 0:
         emergency = grid.status is Status.EMERGENCY
-        for device in _shed_order(running, now):
+        for unit in running:
             if headroom >= 0:
                 break
-            if emergency or device.on_long_enough(now):
-                revoke(device, Reason.EMERGENCY if emergency else Reason.OVER_TARGET)
-                headroom += device.load(now)
+            if emergency or unit.on_long_enough(now):
+                for device in unit.devices:
+                    revoke(device, Reason.EMERGENCY if emergency else Reason.OVER_TARGET)
+                headroom += unit.load(now)
         return actions
 
     if actions or any(d.settling(now) for d in devices):
@@ -195,12 +230,19 @@ def decide(
         need = device.nominal_power + hysteresis
         if headroom >= need:
             return [Action(device.id, True, Reason.HEADROOM)]
-        lower = [d for d in running if d.priority < device.priority and d.on_long_enough(now)]
-        if headroom + sum(d.load(now) for d in lower) >= need:
-            for victim in _shed_order(lower, now):
+        lower = [
+            u
+            for u in running
+            if u.priority < device.priority
+            and u.on_long_enough(now)
+            and (device.group is None or u.group != device.group)
+        ]
+        if headroom + sum(u.load(now) for u in lower) >= need:
+            for victim in lower:
                 if headroom >= need:
                     break
-                revoke(victim, Reason.PREEMPTED)
+                for member in victim.devices:
+                    revoke(member, Reason.PREEMPTED)
                 headroom += victim.load(now)
             return actions
     return actions

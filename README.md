@@ -28,6 +28,19 @@ Settings → Devices & services → Add integration → **House Power Manager**.
 
 All settings can be changed later under **Configure**. Limit and margin can also be changed at runtime with their number entities, without a reload.
 
+### Notifications
+
+In the **Notifications** section of the same form:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| Notify targets | – | A notify action such as `mobile_app_my_phone`, or a notify entity such as `notify.family`. Several are allowed. |
+| Device switched off because of overload | on | One message per balancing step listing the devices switched off because import went over the target or the limit. |
+| Import close to the limit | on | Sent when import comes within the warning margin of the limit, and again only after import was back under the target. |
+| Warning margin | 200 W | With the default limit and margin: warns at 7400 W, between the 7200 W target and the 7600 W limit. At most the margin. |
+
+Devices switched off to make room for a more important device (`preempted`) or because their request ended are not notified. Every message is also written to the log as a warning.
+
 ## Managed devices
 
 Settings → Devices & services → **House Power Manager** → **Add managed device**. Each device can be changed (⋮ → Reconfigure) or deleted on its own.
@@ -39,6 +52,7 @@ Settings → Devices & services → **House Power Manager** → **Add managed de
 | Control entity | The switch (or climate, water heater, fan, light) turned on when power is granted and off when shed |
 | Nominal power | W drawn when running; decides whether there is room to switch it on |
 | Power sensor | Optional. Real consumption, used instead of nominal power when deciding what to shed |
+| Shared power supply | Optional. Devices with the same name here share one supply, e.g. the indoor units of one multi-split outdoor unit. Pick a name already in use or type a new one. |
 | Minimum on / off time | Protects compressors and avoids churn. Minimum on time is ignored when import exceeds the hard limit. |
 | Latency | Seconds until a command shows in the grid measurement. Use 30–60 s for cloud devices (LG ThinQ). |
 
@@ -49,6 +63,7 @@ Settings → Devices & services → **House Power Manager** → **Add managed de
 - **Over target:** granted devices are shed, least important first (equal priority: largest first), until import is back under target. Devices whose power sensor shows they draw nothing are skipped.
 - **Under target:** one requested device is restored per cycle, most important first, when headroom ≥ its nominal power + hysteresis. Nothing is restored while an earlier change hasn't shown in the measurement yet (latency).
 - **Priority:** if the most important waiting device doesn't fit, less important running devices are shed to make room for it.
+- **Shared power supply:** devices on one supply are switched off together, since switching off one indoor unit doesn't stop the outdoor unit. They count as important as their most important running member and are protected until all of them have run their minimum on time. Each is requested and switched on again on its own; one never takes power from another on the same supply.
 - **Sensor fault:** grants are held, nothing new is switched on; ended requests are still switched off.
 - **Manual changes:** followed. The power of a device switched on by hand is not anticipated: it is only shed once the measurement shows import over target.
 - **Restart:** requests and grants are restored and re-applied straight away; the balancer then sheds if needed.

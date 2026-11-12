@@ -24,6 +24,20 @@ DEFAULT_HYSTERESIS: Final = 200.0
 DEFAULT_UPDATE_INTERVAL: Final = 5
 DEFAULT_FAULT_TIMEOUT: Final = 60
 
+# ---- Notifications (a section of the global options) --------------------
+CONF_NOTIFICATIONS: Final = "notifications"
+CONF_NOTIFY_TARGETS: Final = "notify_targets"  # notify actions or notify entities
+CONF_NOTIFY_SHED: Final = "notify_shed"  # a device switched off because of overload
+CONF_NOTIFY_LIMIT: Final = "notify_limit"  # import close to the limit
+CONF_WARNING_MARGIN: Final = "warning_margin"  # W below the limit that counts as close
+
+NOTIFICATION_DEFAULTS: Final = {
+    CONF_NOTIFY_TARGETS: [],
+    CONF_NOTIFY_SHED: True,
+    CONF_NOTIFY_LIMIT: True,
+    CONF_WARNING_MARGIN: 200.0,
+}
+
 DEFAULTS: Final = {
     CONF_SIGN: SIGN_IMPORT_POSITIVE,
     CONF_IMPORT_LIMIT: DEFAULT_IMPORT_LIMIT,
@@ -31,10 +45,13 @@ DEFAULTS: Final = {
     CONF_HYSTERESIS: DEFAULT_HYSTERESIS,
     CONF_UPDATE_INTERVAL: DEFAULT_UPDATE_INTERVAL,
     CONF_FAULT_TIMEOUT: DEFAULT_FAULT_TIMEOUT,
+    CONF_NOTIFICATIONS: NOTIFICATION_DEFAULTS,
 }
 
 # Options the coordinator takes without a reload.
-LIVE_OPTIONS: Final = frozenset({CONF_IMPORT_LIMIT, CONF_MARGIN, CONF_HYSTERESIS})
+LIVE_OPTIONS: Final = frozenset(
+    {CONF_IMPORT_LIMIT, CONF_MARGIN, CONF_HYSTERESIS, CONF_NOTIFICATIONS}
+)
 
 # Grid sensor updates closer together than this are evaluated once.
 DEBOUNCE_SECONDS: Final = 1.0
@@ -59,6 +76,9 @@ CONF_POWER_SENSOR: Final = "power_sensor"
 CONF_MIN_ON_TIME: Final = "min_on_time"  # s
 CONF_MIN_OFF_TIME: Final = "min_off_time"  # s
 CONF_LATENCY: Final = "latency"  # s before a command shows in the grid measurement
+# Devices with the same supply name share one power supply, e.g. the indoor units of a
+# multi-split outdoor unit; they are shed together
+CONF_SUPPLY_GROUP: Final = "supply_group"
 
 DEVICE_DEFAULTS: Final = {
     CONF_PRIORITY: 50,

@@ -18,6 +18,7 @@ from .const import (
     CONF_NOMINAL_POWER,
     CONF_POWER_SENSOR,
     CONF_PRIORITY,
+    CONF_SUPPLY_GROUP,
     DOMAIN,
 )
 
@@ -44,6 +45,7 @@ class ManagedDevice:
     min_on: float
     min_off: float
     latency: float
+    supply_group: str | None = None  # shared power supply, e.g. a multi-split outdoor unit
     requested: bool = False
     granted: bool = False
     managed: bool = True
@@ -64,6 +66,7 @@ class ManagedDevice:
             min_on=float(data[CONF_MIN_ON_TIME]),
             min_off=float(data[CONF_MIN_OFF_TIME]),
             latency=float(data[CONF_LATENCY]),
+            supply_group=(data.get(CONF_SUPPLY_GROUP) or "").strip() or None,
         )
 
     def stored(self) -> dict[str, Any]:
@@ -88,7 +91,13 @@ class ManagedDevice:
             changed_at=self.changed_at,
             commanded_at=self.commanded_at,
             followed=self.reason == Reason.MANUAL,
+            group=self.supply_key,
         )
+
+    @property
+    def supply_key(self) -> str | None:
+        """Supply names match regardless of case and surrounding spaces."""
+        return self.supply_group.casefold() if self.supply_group else None
 
     @property
     def state(self) -> DeviceState:

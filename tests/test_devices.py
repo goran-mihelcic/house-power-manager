@@ -13,6 +13,7 @@ import pytest
 from pytest_homeassistant_custom_component.common import (
     async_capture_events,
     async_fire_time_changed,
+    async_mock_service,
 )
 
 from custom_components.house_power_manager.const import (
@@ -395,3 +396,127 @@ async def test_reconfigure_device(hass: HomeAssistant) -> None:
     await hass.async_block_till_done()
     assert entry.subentries["floor"].data[CONF_NOMINAL_POWER] == 1000
     assert hass.states.get("sensor.floor_heating_state").attributes["nominal_power"] == 1000
+
+
+# ---- Shared power supply -------------------------------------------------
+
+BEDROOM_AC = device(
+    "bedroom_ac",
+    "Bedroom AC",
+    "input_boolean.bedroom_ac",
+    800,
+    priority=2,
+    supply_group="Outdoor unit",
+)
+LIVING_AC = device(
+    "living_ac",
+    "Living AC",
+    "input_boolean.living_ac",
+    1200,
+    priority=2,
+    supply_group="outdoor unit ",
+)
+
+
+async def _setup_acs(hass: HomeAssistant, grid: float = 1000, **options: Any):
+    await setup_booleans(hass, "floor", "bedroom_ac", "living_ac")
+    set_grid(hass, grid)
+    return await setup_hpm(hass, [FLOOR, BEDROOM_AC, LIVING_AC], **options)
+
+
+async def test_shared_supply_is_switched_off_together(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    await _setup_acs(hass)
+    for name in ("floor_heating", "bedroom_ac", "living_ac"):
+        await _switch(hass, f"switch.{name}_requested", True)
+        await _elapse(hass, freezer, 11)
+    assert _state(hass, "input_boolean.bedroom_ac") == "on"
+    assert _state(hass, "input_boolean.living_ac") == "on"
+    attrs = hass.states.get("sensor.bedroom_ac_state").attributes
+    assert attrs["shares_power_with"] == ["Living AC"]
+
+    set_grid(hass, 7400)  # 200 W over target: shedding one indoor unit would do
+    await hass.async_block_till_done()
+    assert _state(hass, "input_boolean.bedroom_ac") == "off"
+    assert _state(hass, "input_boolean.living_ac") == "off"
+    assert _state(hass, "input_boolean.floor") == "on"
+
+
+async def test_supply_field_offers_names_in_use(hass: HomeAssistant) -> None:
+    entry = await _setup_acs(hass)
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, SUBENTRY_DEVICE), context={"source": SOURCE_USER}
+    )
+    schema = result["data_schema"].schema
+    supply = next(key for key in schema if key == "supply_group")
+    # "Outdoor unit" and "outdoor unit " are the same supply: offered once
+    assert schema[supply].config["options"] == ["Outdoor unit"]
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {**NEW_DEVICE, "supply_group": "  "}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    pool = next(s for s in entry.subentries.values() if s.title == "Pool pump")
+    assert "supply_group" not in pool.data
+
+
+# ---- Notifications --------------------------------------------------------
+
+NOTIFY = {
+    "notifications": {
+        "notify_targets": ["phone"],
+        "notify_shed": True,
+        "notify_limit": True,
+        "warning_margin": 200.0,
+    }
+}
+
+
+async def test_notification_when_devices_are_shed(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    calls = async_mock_service(hass, "notify", "phone")
+    await _setup_acs(hass, **NOTIFY)
+    await _switch(hass, "switch.bedroom_ac_requested", True)
+    await _elapse(hass, freezer, 11)
+    await _switch(hass, "switch.living_ac_requested", True)
+    await _elapse(hass, freezer, 11)
+
+    set_grid(hass, 7300)  # over target, under the warning level (7400 W)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert len(calls) == 1
+    assert calls[0].data["message"] == (
+        "Switched off Bedroom AC, Living AC: grid import 7300 W is over the 7200 W target."
+    )
+
+
+async def test_no_notification_for_release_or_when_turned_off(hass: HomeAssistant) -> None:
+    calls = async_mock_service(hass, "notify", "phone")
+    notify = {"notifications": {**NOTIFY["notifications"], "notify_shed": False}}
+    await _setup_acs(hass, **notify)
+    await _switch(hass, "switch.floor_heating_requested", True)
+    await _switch(hass, "switch.floor_heating_requested", False)
+    set_grid(hass, 7300)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert calls == []
+
+
+async def test_limit_warning_once_until_back_under_target(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    calls = async_mock_service(hass, "notify", "phone")
+    await _setup_acs(hass, **NOTIFY)
+    for value in (7300, 7450, 7500, 7300):  # warning level 7400 W
+        await _elapse(hass, freezer, 2)
+        set_grid(hass, value)
+        await hass.async_block_till_done(wait_background_tasks=True)
+    assert [c.data["message"] for c in calls] == [
+        "Grid import 7450 W is close to the 7600 W limit."
+    ]
+
+    for value in (7000, 7450):  # back under target, then close again
+        await _elapse(hass, freezer, 2)
+        set_grid(hass, value)
+        await hass.async_block_till_done(wait_background_tasks=True)
+    assert len(calls) == 2
