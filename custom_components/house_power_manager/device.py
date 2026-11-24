@@ -1,10 +1,10 @@
-"""Runtime state of one managed device (a config subentry)."""
+"""Runtime state of managed devices and shared power supplies (config subentries)."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, ClassVar
 
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -18,12 +18,10 @@ from .const import (
     CONF_NOMINAL_POWER,
     CONF_POWER_SENSOR,
     CONF_PRIORITY,
-    CONF_SUPPLY_GROUP,
+    CONF_SUPPLY,
+    DEVICE_DEFAULTS,
     DOMAIN,
 )
-
-# Kept in the store and restored after a restart
-_STORED = ("requested", "granted", "managed", "changed_at", "reason")
 
 
 class DeviceState(StrEnum):
@@ -34,24 +32,62 @@ class DeviceState(StrEnum):
     OVERRIDE = "override"  # not managed: left alone
 
 
-@dataclass(slots=True)
-class ManagedDevice:
+def _power_settings(data: Any) -> dict[str, Any]:
+    """Power and timing settings; a device on a shared supply has none of its own."""
+    return {
+        "nominal_power": float(data.get(CONF_NOMINAL_POWER, 0)),
+        "power_sensor": data.get(CONF_POWER_SENSOR),
+        "min_on": float(data.get(CONF_MIN_ON_TIME, DEVICE_DEFAULTS[CONF_MIN_ON_TIME])),
+        "min_off": float(data.get(CONF_MIN_OFF_TIME, DEVICE_DEFAULTS[CONF_MIN_OFF_TIME])),
+        "latency": float(data.get(CONF_LATENCY, DEVICE_DEFAULTS[CONF_LATENCY])),
+    }
+
+
+@dataclass(slots=True, kw_only=True)
+class PowerUnit:
+    """What the balancer grants power to: a managed device or a shared supply."""
+
+    MODEL: ClassVar[str]
+    STORED: ClassVar[tuple[str, ...]] = ("granted", "changed_at", "reason")
+
     id: str  # subentry id
     name: str
-    priority: int
-    control_entity: str
     nominal_power: float
     power_sensor: str | None
     min_on: float
     min_off: float
     latency: float
-    supply_group: str | None = None  # shared power supply, e.g. a multi-split outdoor unit
-    requested: bool = False
     granted: bool = False
-    managed: bool = True
-    changed_at: float | None = None  # epoch s of the last grant or managed change
+    changed_at: float | None = None  # epoch s of the last grant change
     reason: str | None = None  # why the grant last changed
-    commanded_at: float | None = None  # last command sent to the control entity
+    commanded_at: float | None = None  # last command sent to a control entity
+
+    def stored(self) -> dict[str, Any]:
+        """Kept in the store and restored after a restart."""
+        return {key: getattr(self, key) for key in self.STORED}
+
+    def restore(self, stored: dict[str, Any]) -> None:
+        for key in self.STORED:
+            if key in stored:
+                setattr(self, key, stored[key])
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(identifiers={(DOMAIN, self.id)}, name=self.name, model=self.MODEL)
+
+
+@dataclass(slots=True, kw_only=True)
+class ManagedDevice(PowerUnit):
+    """A load switched through its control entity."""
+
+    MODEL: ClassVar[str] = "Managed device"
+    STORED: ClassVar[tuple[str, ...]] = (*PowerUnit.STORED, "requested", "managed")
+
+    priority: int
+    control_entity: str
+    supply_id: str | None = None  # draws from this shared supply
+    requested: bool = False
+    managed: bool = True
 
     @classmethod
     def from_subentry(cls, subentry: ConfigSubentry) -> ManagedDevice:
@@ -61,21 +97,9 @@ class ManagedDevice:
             name=subentry.title,
             priority=int(data[CONF_PRIORITY]),
             control_entity=data[CONF_CONTROL_ENTITY],
-            nominal_power=float(data[CONF_NOMINAL_POWER]),
-            power_sensor=data.get(CONF_POWER_SENSOR),
-            min_on=float(data[CONF_MIN_ON_TIME]),
-            min_off=float(data[CONF_MIN_OFF_TIME]),
-            latency=float(data[CONF_LATENCY]),
-            supply_group=(data.get(CONF_SUPPLY_GROUP) or "").strip() or None,
+            supply_id=data.get(CONF_SUPPLY),
+            **_power_settings(data),
         )
-
-    def stored(self) -> dict[str, Any]:
-        return {key: getattr(self, key) for key in _STORED}
-
-    def restore(self, stored: dict[str, Any]) -> None:
-        for key in _STORED:
-            if key in stored:
-                setattr(self, key, stored[key])
 
     def as_input(self, measured_power: float | None) -> DeviceInput:
         return DeviceInput(
@@ -91,13 +115,7 @@ class ManagedDevice:
             changed_at=self.changed_at,
             commanded_at=self.commanded_at,
             followed=self.reason == Reason.MANUAL,
-            group=self.supply_key,
         )
-
-    @property
-    def supply_key(self) -> str | None:
-        """Supply names match regardless of case and surrounding spaces."""
-        return self.supply_group.casefold() if self.supply_group else None
 
     @property
     def state(self) -> DeviceState:
@@ -107,6 +125,56 @@ class ManagedDevice:
             return DeviceState.RUNNING
         return DeviceState.SHED if self.requested else DeviceState.IDLE
 
+
+@dataclass(slots=True, kw_only=True)
+class Supply(PowerUnit):
+    """Power shared by several devices, e.g. a multi-split outdoor unit.
+
+    The balancer sees one load: requested while any of its devices is requested, as
+    important as the most important of them. Its devices run while it is granted.
+    """
+
+    MODEL: ClassVar[str] = "Shared power supply"
+
+    members: list[ManagedDevice] = field(default_factory=list)
+
+    @classmethod
+    def from_subentry(cls, subentry: ConfigSubentry) -> Supply:
+        return cls(id=subentry.subentry_id, name=subentry.title, **_power_settings(subentry.data))
+
     @property
-    def device_info(self) -> DeviceInfo:
-        return DeviceInfo(identifiers={(DOMAIN, self.id)}, name=self.name, model="Managed device")
+    def active(self) -> list[ManagedDevice]:
+        """Its managed devices; one left alone doesn't take part."""
+        return [device for device in self.members if device.managed]
+
+    @property
+    def requested(self) -> bool:
+        return any(device.requested for device in self.active)
+
+    @property
+    def priority(self) -> int:
+        requested = [d.priority for d in self.active if d.requested]
+        return max(requested or [d.priority for d in self.active] or [1])
+
+    def as_input(self, measured_power: float | None) -> DeviceInput:
+        commands = [d.commanded_at for d in self.active if d.commanded_at is not None]
+        return DeviceInput(
+            id=self.id,
+            priority=self.priority,
+            nominal_power=self.nominal_power,
+            measured_power=measured_power,
+            requested=self.requested,
+            granted=self.granted,
+            min_on=self.min_on,
+            min_off=self.min_off,
+            latency=self.latency,
+            changed_at=self.changed_at,
+            commanded_at=max(commands, default=None),
+            followed=self.reason == Reason.MANUAL,
+        )
+
+    @property
+    def state(self) -> DeviceState:
+        if self.granted:
+            return DeviceState.RUNNING
+        return DeviceState.SHED if self.requested else DeviceState.IDLE

@@ -64,8 +64,9 @@ from .const import (
     RETRY_SECONDS,
     SIGN_IMPORT_POSITIVE,
     SUBENTRY_DEVICE,
+    SUBENTRY_SUPPLY,
 )
-from .device import ManagedDevice
+from .device import ManagedDevice, PowerUnit, Supply
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -139,6 +140,21 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
             for subentry_id, sub in entry.subentries.items()
             if sub.subentry_type == SUBENTRY_DEVICE
         }
+        self.supplies: dict[str, Supply] = {
+            subentry_id: Supply.from_subentry(sub)
+            for subentry_id, sub in entry.subentries.items()
+            if sub.subentry_type == SUBENTRY_SUPPLY
+        }
+        for device in self.devices.values():
+            if supply := self.supplies.get(device.supply_id or ""):
+                supply.members.append(device)
+            elif device.supply_id:  # its supply was deleted: the device stands on its own
+                _LOGGER.warning(
+                    "The power supply of %s was deleted: reconfigure %s to set its own power",
+                    device.name,
+                    device.name,
+                )
+                device.supply_id = None
         # Time of the last valid reading. Start-up counts as one, so a grid sensor that
         # loads after this integration doesn't raise a fault straight away.
         self.measured_at = dt_util.utcnow()
@@ -161,6 +177,10 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         """Restore requests and grants from before the restart."""
         stored = await self._store.async_load() or {}
         self.enabled = stored.get("enabled", True)
+        stored_supplies = stored.get("supplies", {})
+        for supply in self.supplies.values():
+            if supply.id in stored_supplies:
+                supply.restore(stored_supplies[supply.id])
         stored_devices = stored.get("devices", {})
         for device in self.devices.values():
             if device.id in stored_devices:
@@ -172,12 +192,22 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         """Follow the device's current on/off state instead of switching it."""
         state = self.hass.states.get(device.control_entity)
         is_on = _known(state) and state.state != STATE_OFF
+        now = dt_util.utcnow().timestamp()
         if is_on and not device.granted:
-            device.changed_at = dt_util.utcnow().timestamp()
+            device.changed_at = now
             device.reason = Reason.MANUAL
         device.granted = is_on
         device.requested = device.requested or is_on
         device.commanded_at = None
+        self._follow_supply(device, now)
+
+    def _follow_supply(self, device: ManagedDevice, now: float) -> None:
+        """A device on a shared supply running outside our control means the supply runs."""
+        supply = self.supplies.get(device.supply_id or "")
+        if supply and device.granted and not supply.granted:
+            supply.granted = True
+            supply.changed_at = now
+            supply.reason = Reason.MANUAL
 
     @callback
     def async_start(self) -> None:
@@ -202,6 +232,7 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         return {
             "enabled": self.enabled,
             "devices": {device.id: device.stored() for device in self.devices.values()},
+            "supplies": {supply.id: supply.stored() for supply in self.supplies.values()},
         }
 
     @callback
@@ -240,6 +271,7 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         device.changed_at = now
         device.reason = Reason.MANUAL
         device.commanded_at = None
+        self._follow_supply(device, now)
         self._save()
         self.async_update_listeners()
         self._refresh_now()
@@ -305,24 +337,53 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
 
     def _balance(self, grid: GridSnapshot, now: float) -> bool:
         """Apply the balancer's decisions. True when a grant changed."""
-        inputs = [
-            device.as_input(self.measured_power(device))
-            for device in self.devices.values()
-            if device.managed
+        units: list[ManagedDevice | Supply] = [
+            d for d in self.devices.values() if d.managed and d.supply_id is None
         ]
-        actions = decide(grid, inputs, now, self.hysteresis)
+        units += [s for s in self.supplies.values() if s.active]
+        actions = decide(
+            grid, [u.as_input(self.measured_power(u)) for u in units], now, self.hysteresis
+        )
         for action in actions:
-            self._apply(self.devices[action.device_id], action, grid, now)
-        if actions:
+            self._apply(self.unit(action.device_id), action, grid, now)
+        changed = bool(actions)
+        for supply in self.supplies.values():
+            changed |= self._sync_members(supply, now)
+        if changed:
             self._save()
+        if actions:
             self._notify_overload(actions, grid)
-        return bool(actions)
+        return changed
 
-    def _apply(self, device: ManagedDevice, action: Action, grid: GridSnapshot, now: float) -> None:
-        device.granted = action.grant
-        device.changed_at = now
-        device.reason = action.reason
-        device.commanded_at = None
+    def _sync_members(self, supply: Supply, now: float, reason: str | None = None) -> bool:
+        """A supply's devices run while it is granted and they are requested.
+
+        The last one released keeps running until the supply itself is released, so the
+        supply's minimum on time protects the outdoor unit. True when a grant changed.
+        """
+        devices = supply.active
+        any_requested = any(d.requested for d in devices)
+        changed = False
+        for device in devices:
+            run = supply.granted and (device.requested or (device.granted and not any_requested))
+            if run == device.granted:
+                continue
+            device.granted = run
+            device.changed_at = now
+            device.reason = reason or (Reason.HEADROOM if run else Reason.RELEASED)
+            device.commanded_at = None
+            changed = True
+        return changed
+
+    def _apply(
+        self, unit: ManagedDevice | Supply, action: Action, grid: GridSnapshot, now: float
+    ) -> None:
+        unit.granted = action.grant
+        unit.changed_at = now
+        unit.reason = action.reason
+        unit.commanded_at = None
+        if isinstance(unit, Supply):
+            self._sync_members(unit, now, action.reason)
         if action.grant:
             verb = "Restoring"
         else:
@@ -330,7 +391,7 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         _LOGGER.info(
             "%s %s (%s): import %s W, headroom %s W",
             verb,
-            device.name,
+            self.label(unit),
             action.reason,
             "?" if grid.grid_import is None else f"{grid.grid_import:.0f}",
             "?" if grid.headroom is None else f"{grid.headroom:.0f}",
@@ -340,13 +401,23 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         self.hass.bus.async_fire(
             EVENT_DEVICE_RESTORED if action.grant else EVENT_DEVICE_SHED,
             {
-                "device": device.name,
-                "device_id": self.registry_device_id(device),
+                "device": unit.name,
+                "device_id": self.registry_device_id(unit),
+                "devices": [d.name for d in unit.active] if isinstance(unit, Supply) else [],
                 "reason": action.reason.value,
-                "power": device.nominal_power,
+                "power": unit.nominal_power,
                 "grid_import": grid.grid_import,
             },
         )
+
+    def unit(self, unit_id: str) -> ManagedDevice | Supply:
+        return self.devices.get(unit_id) or self.supplies[unit_id]
+
+    def label(self, unit: ManagedDevice | Supply) -> str:
+        """The name, with a supply's requested devices: "Outdoor unit (Bedroom AC, Living AC)"."""
+        if isinstance(unit, Supply) and (names := [d.name for d in unit.active if d.requested]):
+            return f"{unit.name} ({', '.join(names)})"
+        return unit.name
 
     # ---- Notifications ---------------------------------------------------
 
@@ -355,7 +426,7 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         shed = [a for a in actions if a.reason in (Reason.OVER_TARGET, Reason.EMERGENCY)]
         if not shed or not self.notifications[CONF_NOTIFY_SHED]:
             return
-        names = ", ".join(self.devices[a.device_id].name for a in shed)
+        names = ", ".join(self.label(self.unit(a.device_id)) for a in shed)
         if any(a.reason is Reason.EMERGENCY for a in shed):
             cause = f"over the {self.limit:.0f} W limit"
         else:
@@ -403,16 +474,6 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
             except Exception as err:  # a broken notifier must not stop balancing
                 _LOGGER.warning("notify.%s failed: %s", name, err)
 
-    def supply_partners(self, device: ManagedDevice) -> list[str]:
-        """Names of the other devices on the same power supply."""
-        if not device.supply_key:
-            return []
-        return [
-            other.name
-            for other in self.devices.values()
-            if other is not device and other.supply_key == device.supply_key
-        ]
-
     async def _async_enforce(self, now: float) -> None:
         """Bring each managed control entity to its grant, retrying slow devices."""
         for device in self.devices.values():
@@ -444,7 +505,7 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
 
     # ---- Readings --------------------------------------------------------
 
-    def registry_device_id(self, device: ManagedDevice) -> str | None:
+    def registry_device_id(self, device: PowerUnit) -> str | None:
         """The device registry id. `async_get_device` is deprecated from HA 2026.10 and its
         replacement doesn't exist in older versions, so the entry's devices are searched."""
         registry = dr.async_get(self.hass)
@@ -453,7 +514,7 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
                 return entry.id
         return None
 
-    def measured_power(self, device: ManagedDevice) -> float | None:
+    def measured_power(self, device: PowerUnit) -> float | None:
         """W from the device's power sensor; None without one or while it can't be read."""
         if not device.power_sensor:
             return None
@@ -465,21 +526,28 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         except ValueError:
             return None
 
-    def _is_on(self, device: ManagedDevice) -> bool:
-        """The control entity is on; while it can't be read, the grant is assumed."""
-        state = self.hass.states.get(device.control_entity)
-        return state.state != STATE_OFF if _known(state) else device.granted
+    def _is_on(self, unit: ManagedDevice | Supply) -> bool:
+        """The control entity is on (a supply: any of its devices); while it can't be read,
+        the grant is assumed."""
+        if isinstance(unit, Supply):
+            return any(self._is_on(device) for device in unit.members)
+        state = self.hass.states.get(unit.control_entity)
+        return state.state != STATE_OFF if _known(state) else unit.granted
 
-    def device_power(self, device: ManagedDevice) -> float:
-        """W the device draws: its power sensor, else its declared power while it is on."""
-        measured = self.measured_power(device)
+    def device_power(self, unit: ManagedDevice | Supply) -> float:
+        """W drawn: the power sensor, else the declared power while it is on."""
+        measured = self.measured_power(unit)
         if measured is not None:
             return measured
-        return device.nominal_power if self._is_on(device) else 0.0
+        return unit.nominal_power if self._is_on(unit) else 0.0
 
     @property
     def managed_load(self) -> float:
-        return sum(self.device_power(d) for d in self.devices.values() if d.managed)
+        """Managed devices on their own plus shared supplies (which include their devices)."""
+        standalone = sum(
+            self.device_power(d) for d in self.devices.values() if d.managed and not d.supply_id
+        )
+        return standalone + sum(self.device_power(s) for s in self.supplies.values() if s.active)
 
     # ---- Changes from entities, services and the UI ----------------------
 

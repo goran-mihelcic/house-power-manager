@@ -6,7 +6,7 @@ from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .coordinator import HpmCoordinator
-from .device import ManagedDevice
+from .device import ManagedDevice, Supply
 
 
 class HpmEntity(CoordinatorEntity[HpmCoordinator]):
@@ -25,12 +25,15 @@ class HpmEntity(CoordinatorEntity[HpmCoordinator]):
 
 
 class HpmDeviceEntity(CoordinatorEntity[HpmCoordinator]):
-    """Ties an entity to one managed device, as `<domain>.<device name>_<key>`."""
+    """Ties an entity to a managed device or shared supply, as `<domain>.<name>_<key>`."""
 
     _attr_has_entity_name = True
 
     def __init__(
-        self, coordinator: HpmCoordinator, device: ManagedDevice, description: EntityDescription
+        self,
+        coordinator: HpmCoordinator,
+        device: ManagedDevice | Supply,
+        description: EntityDescription,
     ) -> None:
         super().__init__(coordinator)
         self.entity_description = description

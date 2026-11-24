@@ -9,12 +9,18 @@ from custom_components.house_power_manager.const import (
     CONF_CONTROL_ENTITY,
     CONF_DEVICE_TYPE,
     CONF_GRID_SENSOR,
+    CONF_LATENCY,
+    CONF_MIN_OFF_TIME,
+    CONF_MIN_ON_TIME,
     CONF_NOMINAL_POWER,
+    CONF_PRIORITY,
+    CONF_SUPPLY,
     DEFAULTS,
     DEVICE_DEFAULTS,
     DEVICE_TYPE_SWITCH,
     DOMAIN,
     SUBENTRY_DEVICE,
+    SUBENTRY_SUPPLY,
 )
 
 pytest_plugins = "pytest_homeassistant_custom_component"
@@ -48,6 +54,39 @@ def device(subentry_id: str, name: str, control: str, power: float, **data: Any)
             CONF_CONTROL_ENTITY: control,
             CONF_NOMINAL_POWER: power,
             **data,
+        },
+    }
+
+
+def supply(subentry_id: str, name: str, power: float, **data: Any) -> dict[str, Any]:
+    """Subentry data for a shared power supply."""
+    return {
+        "subentry_id": subentry_id,
+        "subentry_type": SUBENTRY_SUPPLY,
+        "title": name,
+        "unique_id": None,
+        "data": {
+            CONF_MIN_ON_TIME: 0,
+            CONF_MIN_OFF_TIME: 0,
+            CONF_LATENCY: 10,
+            CONF_NOMINAL_POWER: power,
+            **data,
+        },
+    }
+
+
+def member(subentry_id: str, name: str, control: str, supply_id: str, priority: int) -> dict:
+    """Subentry data for a managed device on a shared supply: no power settings."""
+    return {
+        "subentry_id": subentry_id,
+        "subentry_type": SUBENTRY_DEVICE,
+        "title": name,
+        "unique_id": None,
+        "data": {
+            CONF_DEVICE_TYPE: DEVICE_TYPE_SWITCH,
+            CONF_PRIORITY: priority,
+            CONF_CONTROL_ENTITY: control,
+            CONF_SUPPLY: supply_id,
         },
     }
 

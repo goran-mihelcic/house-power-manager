@@ -1,10 +1,11 @@
-"""UI setup of the global settings and of the managed devices (config subentries)."""
+"""UI setup of the global settings, managed devices and shared supplies (subentries)."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from homeassistant.config_entries import (
+    SOURCE_RECONFIGURE,
     ConfigEntry,
     ConfigFlow,
     ConfigFlowResult,
@@ -38,7 +39,7 @@ from .const import (
     CONF_POWER_SENSOR,
     CONF_PRIORITY,
     CONF_SIGN,
-    CONF_SUPPLY_GROUP,
+    CONF_SUPPLY,
     CONF_UPDATE_INTERVAL,
     CONF_WARNING_MARGIN,
     CONTROL_DOMAINS,
@@ -49,6 +50,7 @@ from .const import (
     SIGN_IMPORT_NEGATIVE,
     SIGN_IMPORT_POSITIVE,
     SUBENTRY_DEVICE,
+    SUBENTRY_SUPPLY,
 )
 
 TITLE = "House Power Manager"
@@ -97,33 +99,44 @@ SCHEMA = vol.Schema(
 )
 
 
-def _device_schema(entry: ConfigEntry, subentry_id: str | None) -> vol.Schema:
-    """The device form; the supply field offers the supply names already in use."""
-    supplies: dict[str, str] = {}  # one entry per supply: names match regardless of case
-    for sub in entry.subentries.values():
-        if sub.subentry_id != subentry_id and (name := sub.data.get(CONF_SUPPLY_GROUP, "").strip()):
-            supplies.setdefault(name.casefold(), name)
-    return vol.Schema(
-        {
-            vol.Required(CONF_NAME): sel.TextSelector(),
-            vol.Required(CONF_PRIORITY): _number(1, 100, 1),
-            vol.Required(CONF_CONTROL_ENTITY): sel.EntitySelector(
-                sel.EntitySelectorConfig(domain=CONTROL_DOMAINS)
-            ),
-            vol.Required(CONF_NOMINAL_POWER): _number(1, 50000, 1, "W"),
-            vol.Optional(CONF_POWER_SENSOR): _power_sensor(),
-            vol.Optional(CONF_SUPPLY_GROUP): sel.SelectSelector(
-                sel.SelectSelectorConfig(
-                    options=sorted(supplies.values(), key=str.casefold),
-                    custom_value=True,
-                    mode=sel.SelectSelectorMode.DROPDOWN,
-                )
-            ),
-            vol.Required(CONF_MIN_ON_TIME): _number(0, 86400, 1, "s"),
-            vol.Required(CONF_MIN_OFF_TIME): _number(0, 86400, 1, "s"),
-            vol.Required(CONF_LATENCY): _number(0, 600, 1, "s"),
-        }
-    )
+def _supply_options(entry: ConfigEntry) -> list[sel.SelectOptionDict]:
+    return [
+        sel.SelectOptionDict(value=sub.subentry_id, label=sub.title)
+        for sub in sorted(entry.subentries.values(), key=lambda s: s.title.casefold())
+        if sub.subentry_type == SUBENTRY_SUPPLY
+    ]
+
+
+def _device_schema(entry: ConfigEntry) -> vol.Schema:
+    """Who the device is; the power supply field only once a supply exists."""
+    schema: dict[vol.Marker, Any] = {
+        vol.Required(CONF_NAME): sel.TextSelector(),
+        vol.Required(CONF_PRIORITY): _number(1, 100, 1),
+        vol.Required(CONF_CONTROL_ENTITY): sel.EntitySelector(
+            sel.EntitySelectorConfig(domain=CONTROL_DOMAINS)
+        ),
+    }
+    if supplies := _supply_options(entry):
+        schema[vol.Optional(CONF_SUPPLY)] = sel.SelectSelector(
+            sel.SelectSelectorConfig(options=supplies, mode=sel.SelectSelectorMode.DROPDOWN)
+        )
+    return vol.Schema(schema)
+
+
+# Power and timing of a device on its own supply, or of a shared supply
+POWER_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_NOMINAL_POWER): _number(1, 50000, 1, "W"),
+        vol.Optional(CONF_POWER_SENSOR): _power_sensor(),
+        vol.Required(CONF_MIN_ON_TIME): _number(0, 86400, 1, "s"),
+        vol.Required(CONF_MIN_OFF_TIME): _number(0, 86400, 1, "s"),
+        vol.Required(CONF_LATENCY): _number(0, 600, 1, "s"),
+    }
+)
+
+SUPPLY_SCHEMA = vol.Schema({vol.Required(CONF_NAME): sel.TextSelector()}).extend(
+    POWER_SCHEMA.schema
+)
 
 
 def _power_unit_error(hass: HomeAssistant, entity_id: str) -> str | None:
@@ -158,34 +171,39 @@ def _validate(hass: HomeAssistant, user_input: dict[str, Any]) -> dict[str, str]
     return errors
 
 
+def _validate_name(entry: ConfigEntry, name: str, subentry_id: str | None) -> str | None:
+    """Device and supply names name their entities, so they must differ."""
+    if not name.strip():
+        return "name_required"
+    others = (sub for sub in entry.subentries.values() if sub.subentry_id != subentry_id)
+    if any(sub.title.casefold() == name.strip().casefold() for sub in others):
+        return "name_in_use"
+    return None
+
+
 def _validate_device(
-    hass: HomeAssistant, entry: ConfigEntry, user_input: dict[str, Any], subentry_id: str | None
+    entry: ConfigEntry, user_input: dict[str, Any], subentry_id: str | None
 ) -> dict[str, str]:
     errors: dict[str, str] = {}
-    others = [sub for sub in entry.subentries.values() if sub.subentry_id != subentry_id]
-    if not user_input[CONF_NAME].strip():
-        errors[CONF_NAME] = "name_required"
-    elif any(sub.title.casefold() == user_input[CONF_NAME].strip().casefold() for sub in others):
-        errors[CONF_NAME] = "name_in_use"
+    if error := _validate_name(entry, user_input[CONF_NAME], subentry_id):
+        errors[CONF_NAME] = error
+    others = (sub for sub in entry.subentries.values() if sub.subentry_id != subentry_id)
     if any(sub.data.get(CONF_CONTROL_ENTITY) == user_input[CONF_CONTROL_ENTITY] for sub in others):
         errors[CONF_CONTROL_ENTITY] = "control_in_use"
-    if (sensor := user_input.get(CONF_POWER_SENSOR)) and (error := _power_unit_error(hass, sensor)):
-        errors[CONF_POWER_SENSOR] = error
     return errors
 
 
-def _clean_supply(user_input: dict[str, Any]) -> None:
-    """An empty supply name means the device has its own supply."""
-    if supply := (user_input.get(CONF_SUPPLY_GROUP) or "").strip():
-        user_input[CONF_SUPPLY_GROUP] = supply
-    else:
-        user_input.pop(CONF_SUPPLY_GROUP, None)
+def _validate_power(hass: HomeAssistant, user_input: dict[str, Any]) -> dict[str, str]:
+    if (sensor := user_input.get(CONF_POWER_SENSOR)) and (error := _power_unit_error(hass, sensor)):
+        return {CONF_POWER_SENSOR: error}
+    return {}
 
 
 class HpmConfigFlow(ConfigFlow, domain=DOMAIN):
     """Set up the single House Power Manager entry."""
 
     VERSION = 1
+    MINOR_VERSION = 2  # 2: shared supplies are subentries, not names on devices
 
     @staticmethod
     @callback
@@ -197,7 +215,7 @@ class HpmConfigFlow(ConfigFlow, domain=DOMAIN):
     def async_get_supported_subentry_types(
         cls, config_entry: ConfigEntry
     ) -> dict[str, type[ConfigSubentryFlow]]:
-        return {SUBENTRY_DEVICE: DeviceSubentryFlow}
+        return {SUBENTRY_DEVICE: DeviceSubentryFlow, SUBENTRY_SUPPLY: SupplySubentryFlow}
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
@@ -233,46 +251,134 @@ class HpmOptionsFlow(OptionsFlow):
 
 
 class DeviceSubentryFlow(ConfigSubentryFlow):
-    """Add or change a managed device. The name is the subentry title."""
+    """Add or change a managed device. The name is the subentry title.
+
+    A device on a shared supply is done after the first step; one on its own supply
+    goes on to its power and timing settings.
+    """
+
+    def __init__(self) -> None:
+        self._name = ""
+        self._data: dict[str, Any] = {}
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
-        errors: dict[str, str] = {}
-        if user_input is not None:
-            errors = _validate_device(self.hass, self._get_entry(), user_input, None)
-            _clean_supply(user_input)
-            if not errors:
-                name = user_input.pop(CONF_NAME).strip()
-                return self.async_create_entry(
-                    title=name, data={CONF_DEVICE_TYPE: DEVICE_TYPE_SWITCH, **user_input}
-                )
-        return self.async_show_form(
-            step_id="user",
-            data_schema=self.add_suggested_values_to_schema(
-                _device_schema(self._get_entry(), None),
-                {**DEVICE_DEFAULTS, **(user_input or {})},
-            ),
-            errors=errors,
-        )
+        return await self._async_step_device("user", None, user_input)
+
+    async def async_step_power(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        return await self._async_step_power("power", None, user_input)
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        entry = self._get_entry()
         subentry = self._get_reconfigure_subentry()
+        return await self._async_step_device(
+            "reconfigure", {CONF_NAME: subentry.title, **subentry.data}, user_input
+        )
+
+    async def async_step_reconfigure_power(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        return await self._async_step_power(
+            "reconfigure_power", dict(self._get_reconfigure_subentry().data), user_input
+        )
+
+    @property
+    def _reconfiguring(self) -> bool:
+        return self.source == SOURCE_RECONFIGURE
+
+    async def _async_step_device(
+        self, step_id: str, current: dict[str, Any] | None, user_input: dict[str, Any] | None
+    ) -> SubentryFlowResult:
+        entry = self._get_entry()
+        subentry_id = self._get_reconfigure_subentry().subentry_id if self._reconfiguring else None
         errors: dict[str, str] = {}
         if user_input is not None:
-            errors = _validate_device(self.hass, entry, user_input, subentry.subentry_id)
-            _clean_supply(user_input)
+            errors = _validate_device(entry, user_input, subentry_id)
+            if not errors:
+                self._name = user_input.pop(CONF_NAME).strip()
+                self._data = {CONF_DEVICE_TYPE: DEVICE_TYPE_SWITCH, **user_input}
+                if user_input.get(CONF_SUPPLY):
+                    return self._async_finish()
+                if self._reconfiguring:
+                    return await self.async_step_reconfigure_power()
+                return await self.async_step_power()
+        return self.async_show_form(
+            step_id=step_id,
+            data_schema=self.add_suggested_values_to_schema(
+                _device_schema(entry), {**DEVICE_DEFAULTS, **(current or {}), **(user_input or {})}
+            ),
+            errors=errors,
+        )
+
+    async def _async_step_power(
+        self, step_id: str, current: dict[str, Any] | None, user_input: dict[str, Any] | None
+    ) -> SubentryFlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            errors = _validate_power(self.hass, user_input)
+            if not errors:
+                self._data.update(user_input)
+                return self._async_finish()
+        return self.async_show_form(
+            step_id=step_id,
+            data_schema=self.add_suggested_values_to_schema(
+                POWER_SCHEMA, {**DEVICE_DEFAULTS, **(current or {}), **(user_input or {})}
+            ),
+            errors=errors,
+            description_placeholders={"name": self._name},
+        )
+
+    @callback
+    def _async_finish(self) -> SubentryFlowResult:
+        # The data is replaced, not merged, so cleared fields are removed
+        if self._reconfiguring:
+            return self.async_update_and_abort(
+                self._get_entry(),
+                self._get_reconfigure_subentry(),
+                title=self._name,
+                data=self._data,
+            )
+        return self.async_create_entry(title=self._name, data=self._data)
+
+
+class SupplySubentryFlow(ConfigSubentryFlow):
+    """Add or change a shared power supply, e.g. a multi-split outdoor unit."""
+
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        return await self._async_step("user", None, user_input)
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        subentry = self._get_reconfigure_subentry()
+        return await self._async_step(
+            "reconfigure", {CONF_NAME: subentry.title, **subentry.data}, user_input
+        )
+
+    async def _async_step(
+        self, step_id: str, current: dict[str, Any] | None, user_input: dict[str, Any] | None
+    ) -> SubentryFlowResult:
+        entry = self._get_entry()
+        reconfiguring = self.source == SOURCE_RECONFIGURE
+        subentry_id = self._get_reconfigure_subentry().subentry_id if reconfiguring else None
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            errors = _validate_power(self.hass, user_input)
+            if error := _validate_name(entry, user_input[CONF_NAME], subentry_id):
+                errors[CONF_NAME] = error
             if not errors:
                 name = user_input.pop(CONF_NAME).strip()
-                # Replace rather than merge, so a cleared power sensor is removed
-                data = {CONF_DEVICE_TYPE: subentry.data[CONF_DEVICE_TYPE], **user_input}
-                return self.async_update_and_abort(entry, subentry, title=name, data=data)
-        current = {CONF_NAME: subentry.title, **subentry.data}
+                if reconfiguring:
+                    return self.async_update_and_abort(
+                        entry, self._get_reconfigure_subentry(), title=name, data=user_input
+                    )
+                return self.async_create_entry(title=name, data=user_input)
         return self.async_show_form(
-            step_id="reconfigure",
+            step_id=step_id,
             data_schema=self.add_suggested_values_to_schema(
-                _device_schema(entry, subentry.subentry_id), {**current, **(user_input or {})}
+                SUPPLY_SCHEMA, {**DEVICE_DEFAULTS, **(current or {}), **(user_input or {})}
             ),
             errors=errors,
         )

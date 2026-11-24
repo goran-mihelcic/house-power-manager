@@ -21,7 +21,7 @@ from homeassistant.util import dt as dt_util
 
 from .balancer import Status
 from .coordinator import HpmConfigEntry, HpmCoordinator
-from .device import DeviceState, ManagedDevice
+from .device import DeviceState, Supply
 from .entity import HpmDeviceEntity, HpmEntity
 
 
@@ -94,12 +94,17 @@ async def async_setup_entry(
     coordinator = entry.runtime_data
     async_add_entities(HpmSensor(coordinator, description) for description in SENSORS)
     for device in coordinator.devices.values():
+        entities: list[SensorEntity] = [DeviceStateSensor(coordinator, device, DEVICE_STATE)]
+        if not device.supply_id:  # a device on a shared supply: its power is the supply's
+            entities.append(GrantedPowerSensor(coordinator, device, GRANTED_POWER))
+        async_add_entities(entities, config_subentry_id=device.id)
+    for supply in coordinator.supplies.values():
         async_add_entities(
             [
-                GrantedPowerSensor(coordinator, device, GRANTED_POWER),
-                DeviceStateSensor(coordinator, device, DEVICE_STATE),
+                GrantedPowerSensor(coordinator, supply, GRANTED_POWER),
+                DeviceStateSensor(coordinator, supply, DEVICE_STATE),
             ],
-            config_subentry_id=device.id,
+            config_subentry_id=supply.id,
         )
 
 
@@ -151,19 +156,34 @@ class DeviceStateSensor(HpmDeviceEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        device: ManagedDevice = self._device
-        changed_at = device.changed_at
-        return {
-            "priority": device.priority,
-            "nominal_power": device.nominal_power,
-            "control_entity": device.control_entity,
-            "power_sensor": device.power_sensor,
-            "requested": device.requested,
-            "granted": device.granted,
-            "managed": device.managed,
-            "supply_group": device.supply_group,
-            "shares_power_with": self.coordinator.supply_partners(device),
-            "reason": device.reason,
+        unit = self._device
+        changed_at = unit.changed_at
+        attrs: dict[str, Any] = {"priority": unit.priority}
+        if isinstance(unit, Supply):
+            attrs |= {
+                "nominal_power": unit.nominal_power,
+                "power_sensor": unit.power_sensor,
+                "devices": [device.name for device in unit.members],
+                "requested": unit.requested,
+            }
+        elif supply := self.coordinator.supplies.get(unit.supply_id or ""):
+            attrs |= {
+                "control_entity": unit.control_entity,
+                "power_supply": supply.name,
+                "requested": unit.requested,
+                "managed": unit.managed,
+            }
+        else:
+            attrs |= {
+                "nominal_power": unit.nominal_power,
+                "control_entity": unit.control_entity,
+                "power_sensor": unit.power_sensor,
+                "requested": unit.requested,
+                "managed": unit.managed,
+            }
+        return attrs | {
+            "granted": unit.granted,
+            "reason": unit.reason,
             "last_change": (
                 dt_util.utc_from_timestamp(changed_at).isoformat() if changed_at else None
             ),

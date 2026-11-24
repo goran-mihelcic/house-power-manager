@@ -11,6 +11,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import ServiceValidationError
 import pytest
 from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
     async_capture_events,
     async_fire_time_changed,
     async_mock_service,
@@ -18,18 +19,32 @@ from pytest_homeassistant_custom_component.common import (
 
 from custom_components.house_power_manager.const import (
     CONF_CONTROL_ENTITY,
+    CONF_GRID_SENSOR,
     CONF_LATENCY,
     CONF_MIN_OFF_TIME,
     CONF_MIN_ON_TIME,
     CONF_NOMINAL_POWER,
     CONF_PRIORITY,
+    CONF_SUPPLY,
+    DEFAULTS,
     DOMAIN,
     EVENT_DEVICE_RESTORED,
     EVENT_DEVICE_SHED,
     SUBENTRY_DEVICE,
+    SUBENTRY_SUPPLY,
 )
 
-from .conftest import STORAGE_KEY, device, set_grid, setup_booleans, setup_hpm
+from .conftest import (
+    ENTRY_ID,
+    GRID,
+    STORAGE_KEY,
+    device,
+    member,
+    set_grid,
+    setup_booleans,
+    setup_hpm,
+    supply,
+)
 
 FLOOR = device("floor", "Floor heating", "input_boolean.floor", 2000, priority=5)
 POOL = device("pool", "Pool pump", "input_boolean.pool", 1000, priority=1)
@@ -348,6 +363,8 @@ NEW_DEVICE = {
     CONF_NAME: "Pool pump",
     CONF_PRIORITY: 1,
     CONF_CONTROL_ENTITY: "input_boolean.pool",
+}
+NEW_POWER = {
     CONF_NOMINAL_POWER: 1000,
     CONF_MIN_ON_TIME: 0,
     CONF_MIN_OFF_TIME: 0,
@@ -355,13 +372,21 @@ NEW_DEVICE = {
 }
 
 
-async def test_add_device(hass: HomeAssistant) -> None:
-    entry = await _setup(hass, FLOOR)
+async def _start_flow(hass: HomeAssistant, entry, subentry_type: str = SUBENTRY_DEVICE) -> dict:
     result = await hass.config_entries.subentries.async_init(
-        (entry.entry_id, SUBENTRY_DEVICE), context={"source": SOURCE_USER}
+        (entry.entry_id, subentry_type), context={"source": SOURCE_USER}
     )
     assert result["type"] is FlowResultType.FORM
+    return result
+
+
+async def test_add_device(hass: HomeAssistant) -> None:
+    entry = await _setup(hass, FLOOR)
+    result = await _start_flow(hass, entry)
+    assert CONF_SUPPLY not in result["data_schema"].schema  # no supply exists yet
     result = await hass.config_entries.subentries.async_configure(result["flow_id"], NEW_DEVICE)
+    assert result["step_id"] == "power"
+    result = await hass.config_entries.subentries.async_configure(result["flow_id"], NEW_POWER)
     assert result["type"] is FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done()
     assert _state(hass, "sensor.pool_pump_state") == "idle"
@@ -370,9 +395,7 @@ async def test_add_device(hass: HomeAssistant) -> None:
 
 async def test_add_device_validation(hass: HomeAssistant) -> None:
     entry = await _setup(hass, FLOOR)
-    result = await hass.config_entries.subentries.async_init(
-        (entry.entry_id, SUBENTRY_DEVICE), context={"source": SOURCE_USER}
-    )
+    result = await _start_flow(hass, entry)
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"],
         {**NEW_DEVICE, CONF_NAME: "floor heating", CONF_CONTROL_ENTITY: "input_boolean.floor"},
@@ -386,11 +409,12 @@ async def test_reconfigure_device(hass: HomeAssistant) -> None:
         (entry.entry_id, SUBENTRY_DEVICE),
         context={"source": SOURCE_RECONFIGURE, "subentry_id": "floor"},
     )
-    assert result["type"] is FlowResultType.FORM
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"],
         {**NEW_DEVICE, CONF_NAME: "Floor heating", CONF_CONTROL_ENTITY: "input_boolean.floor"},
     )
+    assert result["step_id"] == "reconfigure_power"
+    result = await hass.config_entries.subentries.async_configure(result["flow_id"], NEW_POWER)
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
     await hass.async_block_till_done()
@@ -398,67 +422,256 @@ async def test_reconfigure_device(hass: HomeAssistant) -> None:
     assert hass.states.get("sensor.floor_heating_state").attributes["nominal_power"] == 1000
 
 
+async def test_add_supply_then_a_device_on_it(hass: HomeAssistant) -> None:
+    hass.states.async_set("sensor.outdoor_power", "0", {"unit_of_measurement": "W"})
+    entry = await _setup(hass, FLOOR)
+    result = await _start_flow(hass, entry, SUBENTRY_SUPPLY)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        {CONF_NAME: "Outdoor unit", **NEW_POWER, "power_sensor": "sensor.outdoor_power"},
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    outdoor = next(s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_SUPPLY)
+    assert _state(hass, "sensor.outdoor_unit_state") == "idle"
+
+    # The device form now offers the supply; with it chosen there is no power step
+    result = await _start_flow(hass, entry)
+    supply_field = result["data_schema"].schema[CONF_SUPPLY]
+    assert supply_field.config["options"] == [
+        {"value": outdoor.subentry_id, "label": "Outdoor unit"}
+    ]
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {**NEW_DEVICE, CONF_SUPPLY: outdoor.subentry_id}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    pool = next(s for s in entry.subentries.values() if s.title == "Pool pump")
+    assert pool.data[CONF_SUPPLY] == outdoor.subentry_id
+    assert CONF_NOMINAL_POWER not in pool.data
+    attrs = hass.states.get("sensor.pool_pump_state").attributes
+    assert attrs["power_supply"] == "Outdoor unit"
+    assert hass.states.get("sensor.pool_pump_granted_power") is None
+
+
+async def test_supply_validation(hass: HomeAssistant) -> None:
+    hass.states.async_set("sensor.outdoor_energy", "0", {"unit_of_measurement": "kWh"})
+    entry = await _setup(hass, FLOOR)
+    result = await _start_flow(hass, entry, SUBENTRY_SUPPLY)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        {CONF_NAME: "Floor Heating", **NEW_POWER, "power_sensor": "sensor.outdoor_energy"},
+    )
+    assert result["errors"] == {CONF_NAME: "name_in_use", "power_sensor": "unsupported_unit"}
+
+
 # ---- Shared power supply -------------------------------------------------
 
-BEDROOM_AC = device(
-    "bedroom_ac",
-    "Bedroom AC",
-    "input_boolean.bedroom_ac",
-    800,
-    priority=2,
-    supply_group="Outdoor unit",
-)
-LIVING_AC = device(
-    "living_ac",
-    "Living AC",
-    "input_boolean.living_ac",
-    1200,
-    priority=2,
-    supply_group="outdoor unit ",
-)
+OUTDOOR = supply("outdoor", "Outdoor unit", 2500)
+BEDROOM_AC = member("bedroom_ac", "Bedroom AC", "input_boolean.bedroom_ac", "outdoor", 2)
+LIVING_AC = member("living_ac", "Living AC", "input_boolean.living_ac", "outdoor", 3)
 
 
-async def _setup_acs(hass: HomeAssistant, grid: float = 1000, **options: Any):
+async def _setup_acs(
+    hass: HomeAssistant, grid: float = 1000, outdoor: dict | None = None, **options: Any
+):
     await setup_booleans(hass, "floor", "bedroom_ac", "living_ac")
     set_grid(hass, grid)
-    return await setup_hpm(hass, [FLOOR, BEDROOM_AC, LIVING_AC], **options)
+    devices = [FLOOR, outdoor or OUTDOOR, BEDROOM_AC, LIVING_AC]
+    return await setup_hpm(hass, devices, **options)
 
 
-async def test_shared_supply_is_switched_off_together(
+async def _run_both_acs(hass: HomeAssistant, freezer: FrozenDateTimeFactory) -> None:
+    await _switch(hass, "switch.bedroom_ac_requested", True)
+    await _switch(hass, "switch.living_ac_requested", True)
+    await _elapse(hass, freezer, 11)
+    assert _state(hass, "input_boolean.bedroom_ac") == "on"
+    assert _state(hass, "input_boolean.living_ac") == "on"
+
+
+async def test_supply_entities(hass: HomeAssistant) -> None:
+    await _setup_acs(hass)
+    assert _state(hass, "binary_sensor.outdoor_unit_granted") == "off"
+    assert _state(hass, "sensor.outdoor_unit_state") == "idle"
+    assert float(_state(hass, "sensor.outdoor_unit_granted_power")) == 0
+    attrs = hass.states.get("sensor.outdoor_unit_state").attributes
+    assert attrs["devices"] == ["Bedroom AC", "Living AC"]
+    assert attrs["nominal_power"] == 2500
+    # Its devices have no power of their own and no requested switch on the supply
+    assert hass.states.get("sensor.bedroom_ac_granted_power") is None
+    assert hass.states.get("switch.outdoor_unit_requested") is None
+
+
+async def test_first_request_needs_room_for_the_whole_supply(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    await _setup_acs(hass, grid=5000)  # headroom 2200 W < 2500 + 200 W
+    await _switch(hass, "switch.bedroom_ac_requested", True)
+    assert _state(hass, "input_boolean.bedroom_ac") == "off"
+    assert _state(hass, "sensor.bedroom_ac_state") == "shed"
+    assert _state(hass, "sensor.outdoor_unit_state") == "shed"
+
+    await _elapse(hass, freezer, 2)
+    set_grid(hass, 4000)
+    await hass.async_block_till_done()
+    assert _state(hass, "input_boolean.bedroom_ac") == "on"
+    assert _state(hass, "sensor.outdoor_unit_state") == "running"
+    assert float(_state(hass, "sensor.outdoor_unit_granted_power")) == 2500
+
+
+async def test_more_devices_join_a_running_supply(
     hass: HomeAssistant, freezer: FrozenDateTimeFactory
 ) -> None:
     await _setup_acs(hass)
-    for name in ("floor_heating", "bedroom_ac", "living_ac"):
-        await _switch(hass, f"switch.{name}_requested", True)
-        await _elapse(hass, freezer, 11)
-    assert _state(hass, "input_boolean.bedroom_ac") == "on"
+    await _switch(hass, "switch.bedroom_ac_requested", True)
+    await _elapse(hass, freezer, 11)
+    set_grid(hass, 6900)  # little headroom left, but the outdoor unit already runs
+    await hass.async_block_till_done()
+    await _switch(hass, "switch.living_ac_requested", True)
     assert _state(hass, "input_boolean.living_ac") == "on"
-    attrs = hass.states.get("sensor.bedroom_ac_state").attributes
-    assert attrs["shares_power_with"] == ["Living AC"]
 
-    set_grid(hass, 7400)  # 200 W over target: shedding one indoor unit would do
+
+async def test_shed_switches_off_all_and_restores_those_still_requested(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    await _setup_acs(hass)
+    shed = async_capture_events(hass, EVENT_DEVICE_SHED)
+    await _run_both_acs(hass, freezer)
+
+    set_grid(hass, 7400)
     await hass.async_block_till_done()
     assert _state(hass, "input_boolean.bedroom_ac") == "off"
     assert _state(hass, "input_boolean.living_ac") == "off"
+    assert _state(hass, "sensor.outdoor_unit_state") == "shed"
+    assert _state(hass, "sensor.bedroom_ac_state") == "shed"
+    assert shed[0].data["device"] == "Outdoor unit"
+    assert shed[0].data["devices"] == ["Bedroom AC", "Living AC"]
+
+    # The living room no longer wants it while the supply is off
+    await _switch(hass, "switch.living_ac_requested", False)
+    await _elapse(hass, freezer, 11)
+    set_grid(hass, 3000)
+    await hass.async_block_till_done()
+    assert _state(hass, "input_boolean.bedroom_ac") == "on"
+    assert _state(hass, "input_boolean.living_ac") == "off"
+
+
+async def test_supply_is_as_important_as_its_most_important_request(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    # Floor heating priority 5; living AC 3, bedroom AC 2
+    await _setup_acs(hass)
+    await _switch(hass, "switch.floor_heating_requested", True)
+    await _elapse(hass, freezer, 11)
+    await _run_both_acs(hass, freezer)
+    set_grid(hass, 7400)
+    await hass.async_block_till_done()
     assert _state(hass, "input_boolean.floor") == "on"
+    assert _state(hass, "input_boolean.living_ac") == "off"
 
 
-async def test_supply_field_offers_names_in_use(hass: HomeAssistant) -> None:
-    entry = await _setup_acs(hass)
-    result = await hass.config_entries.subentries.async_init(
-        (entry.entry_id, SUBENTRY_DEVICE), context={"source": SOURCE_USER}
+async def test_last_device_released_waits_for_the_supply_min_on_time(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    outdoor = supply("outdoor", "Outdoor unit", 2500, min_on_time=120)
+    await _setup_acs(hass, outdoor=outdoor)
+    await _run_both_acs(hass, freezer)
+
+    await _switch(hass, "switch.living_ac_requested", False)
+    assert _state(hass, "input_boolean.living_ac") == "off"  # the other still runs it
+    await _switch(hass, "switch.bedroom_ac_requested", False)
+    assert _state(hass, "input_boolean.bedroom_ac") == "on"  # protects the compressor
+    await _elapse(hass, freezer, 120)
+    assert _state(hass, "input_boolean.bedroom_ac") == "off"
+    assert _state(hass, "sensor.outdoor_unit_state") == "idle"
+
+
+async def test_supply_power_meter(hass: HomeAssistant, freezer: FrozenDateTimeFactory) -> None:
+    hass.states.async_set("sensor.outdoor_power", "1.8", {"unit_of_measurement": "kW"})
+    await _setup_acs(
+        hass, outdoor=supply("outdoor", "Outdoor unit", 2500, power_sensor="sensor.outdoor_power")
     )
-    schema = result["data_schema"].schema
-    supply = next(key for key in schema if key == "supply_group")
-    # "Outdoor unit" and "outdoor unit " are the same supply: offered once
-    assert schema[supply].config["options"] == ["Outdoor unit"]
+    await _run_both_acs(hass, freezer)
+    assert float(_state(hass, "sensor.outdoor_unit_granted_power")) == 1800
+    assert float(_state(hass, "sensor.hpm_managed_load")) == 1800
 
-    result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], {**NEW_DEVICE, "supply_group": "  "}
+
+async def test_device_switched_on_by_hand_runs_its_supply(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    await _setup_acs(hass)
+    await _by_hand(hass, "input_boolean.bedroom_ac", True)
+    await _elapse(hass, freezer, 6)
+    assert _state(hass, "input_boolean.bedroom_ac") == "on"
+    assert _state(hass, "sensor.outdoor_unit_state") == "running"
+    assert hass.states.get("sensor.outdoor_unit_state").attributes["reason"] == "manual"
+
+
+async def test_restart_restores_the_supply(
+    hass: HomeAssistant, hass_storage: dict[str, Any]
+) -> None:
+    hass_storage[STORAGE_KEY] = {
+        "version": 1,
+        "data": {
+            "enabled": True,
+            "devices": {
+                "bedroom_ac": {"requested": True, "granted": True, "managed": True},
+                "living_ac": {"requested": False, "granted": False, "managed": True},
+            },
+            "supplies": {"outdoor": {"granted": True, "reason": "headroom"}},
+        },
+    }
+    await _setup_acs(hass)
+    assert _state(hass, "input_boolean.bedroom_ac") == "on"
+    assert _state(hass, "input_boolean.living_ac") == "off"
+    assert _state(hass, "sensor.outdoor_unit_state") == "running"
+
+
+async def test_supply_names_from_0_3_are_migrated(hass: HomeAssistant) -> None:
+    await setup_booleans(hass, "bedroom_ac", "living_ac")
+    set_grid(hass, 1000)
+    old = [
+        device(
+            "bedroom_ac",
+            "Bedroom AC",
+            "input_boolean.bedroom_ac",
+            800,
+            priority=2,
+            supply_group="Outdoor unit",
+            min_on_time=60,
+        ),
+        device(
+            "living_ac",
+            "Living AC",
+            "input_boolean.living_ac",
+            1200,
+            priority=3,
+            supply_group="outdoor unit ",
+        ),
+        FLOOR,
+    ]
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        entry_id=ENTRY_ID,
+        options={**DEFAULTS, CONF_GRID_SENSOR: GRID},
+        subentries_data=old,
+        minor_version=1,
     )
-    assert result["type"] is FlowResultType.CREATE_ENTRY
-    pool = next(s for s in entry.subentries.values() if s.title == "Pool pump")
-    assert "supply_group" not in pool.data
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert entry.minor_version == 2
+    supplies = [s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_SUPPLY]
+    assert [s.title for s in supplies] == ["Outdoor unit"]
+    assert supplies[0].data[CONF_NOMINAL_POWER] == 2000
+    assert supplies[0].data[CONF_MIN_ON_TIME] == 60
+    for device_id in ("bedroom_ac", "living_ac"):
+        data = entry.subentries[device_id].data
+        assert data[CONF_SUPPLY] == supplies[0].subentry_id
+        assert "supply_group" not in data
+    assert CONF_SUPPLY not in entry.subentries["floor"].data
+    assert _state(hass, "sensor.outdoor_unit_state") == "idle"
 
 
 # ---- Notifications --------------------------------------------------------
@@ -478,16 +691,14 @@ async def test_notification_when_devices_are_shed(
 ) -> None:
     calls = async_mock_service(hass, "notify", "phone")
     await _setup_acs(hass, **NOTIFY)
-    await _switch(hass, "switch.bedroom_ac_requested", True)
-    await _elapse(hass, freezer, 11)
-    await _switch(hass, "switch.living_ac_requested", True)
-    await _elapse(hass, freezer, 11)
+    await _run_both_acs(hass, freezer)
 
     set_grid(hass, 7300)  # over target, under the warning level (7400 W)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert len(calls) == 1
     assert calls[0].data["message"] == (
-        "Switched off Bedroom AC, Living AC: grid import 7300 W is over the 7200 W target."
+        "Switched off Outdoor unit (Bedroom AC, Living AC): "
+        "grid import 7300 W is over the 7200 W target."
     )
 
 

@@ -50,11 +50,33 @@ Settings → Devices & services → **House Power Manager** → **Add managed de
 | Name | Also names the device's entities, e.g. *Floor heating* → `switch.floor_heating_requested` |
 | Priority | 1–100. **1 is shed first.** A waiting device can take power from running devices with a lower number. |
 | Control entity | The switch (or climate, water heater, fan, light) turned on when power is granted and off when shed |
+| Power supply | Optional, once a shared power supply exists (see below). A device on a shared supply has no power settings of its own: the next step is skipped. |
+
+A device on its own supply then gets a second step:
+
+| Setting | Meaning |
+|---|---|
 | Nominal power | W drawn when running; decides whether there is room to switch it on |
 | Power sensor | Optional. Real consumption, used instead of nominal power when deciding what to shed |
-| Shared power supply | Optional. Devices with the same name here share one supply, e.g. the indoor units of one multi-split outdoor unit. Pick a name already in use or type a new one. |
 | Minimum on / off time | Protects compressors and avoids churn. Minimum on time is ignored when import exceeds the hard limit. |
 | Latency | Seconds until a command shows in the grid measurement. Use 30–60 s for cloud devices (LG ThinQ). |
+
+### Shared power supplies
+
+Several devices can draw from one supply, such as the indoor units of a multi-split air conditioner on one outdoor unit. Switching off one indoor unit doesn't stop the outdoor unit, and its power meter covers all of them.
+
+1. **Add shared power supply** (next to **Add managed device**): a name (e.g. *Outdoor unit*), its nominal power (the outdoor unit's rated input, all indoor units running), an optional power sensor on the outdoor unit, minimum on / off time and latency.
+2. Add each indoor unit as a managed device with its priority and control entity, and choose the supply as its **Power supply**.
+
+The balancer then treats the supply as one load:
+
+- It is requested while any of its devices is requested, and as important as the most important of them.
+- Switching it on needs headroom for the supply's nominal power + hysteresis. More devices joining a running supply are switched on straight away.
+- When it is shed, all its devices are switched off. When there is room again, the devices still requested come back on.
+- The last device released keeps running until the supply has run its minimum on time.
+- A device switched on by hand also runs its supply.
+
+Each indoor unit keeps its own **Requested** and **Managed** switches. Power, granted and state for the outdoor unit are on the supply's device.
 
 > **Switching a device by hand is followed, not fought.** If a managed device is switched on or off outside the integration (wall switch, app, another automation), that becomes its new request and grant. A device that is already on when you add it keeps running. A device switched on by hand still counts in balancing: when the measurement shows import over target it can be shed like any other, and it comes back on once there is room. Turn the device's **Managed** switch off to keep the integration from ever switching it.
 
@@ -63,7 +85,7 @@ Settings → Devices & services → **House Power Manager** → **Add managed de
 - **Over target:** granted devices are shed, least important first (equal priority: largest first), until import is back under target. Devices whose power sensor shows they draw nothing are skipped.
 - **Under target:** one requested device is restored per cycle, most important first, when headroom ≥ its nominal power + hysteresis. Nothing is restored while an earlier change hasn't shown in the measurement yet (latency).
 - **Priority:** if the most important waiting device doesn't fit, less important running devices are shed to make room for it.
-- **Shared power supply:** devices on one supply are switched off together, since switching off one indoor unit doesn't stop the outdoor unit. They count as important as their most important running member and are protected until all of them have run their minimum on time. Each is requested and switched on again on its own; one never takes power from another on the same supply.
+- **Shared power supply:** one load for the balancer; see above.
 - **Sensor fault:** grants are held, nothing new is switched on; ended requests are still switched off.
 - **Manual changes:** followed. The power of a device switched on by hand is not anticipated: it is only shed once the measurement shows import over target.
 - **Restart:** requests and grants are restored and re-applied straight away; the balancer then sheds if needed.
@@ -88,9 +110,11 @@ Each managed device (`<name>` from its name):
 |---|---|
 | `switch.<name>_requested` | Ask for power. Turn this on instead of the device itself. |
 | `binary_sensor.<name>_granted` | Power granted; attribute `reason` |
-| `sensor.<name>_granted_power` | Power the device draws: its power sensor, or its nominal power while it is on (0 when off) |
-| `sensor.<name>_state` | `idle` / `running` / `shed` / `override`; attributes priority, reason, last change |
+| `sensor.<name>_granted_power` | Power the device draws: its power sensor, or its nominal power while it is on (0 when off). Not for a device on a shared supply. |
+| `sensor.<name>_state` | `idle` / `running` / `shed` / `override`; attributes priority, reason, last change, `power_supply` |
 | `switch.<name>_managed` | Off: the device is left alone (its power still counts in grid import) |
+
+Each shared power supply has `binary_sensor.<name>_granted`, `sensor.<name>_granted_power` (its power sensor, or its nominal power while any of its devices is on) and `sensor.<name>_state` (attribute `devices`).
 
 ## Services and events
 
@@ -101,7 +125,7 @@ Each managed device (`<name>` from its name):
 | `house_power_manager.set_priority` | `device`, `priority` (1–100) |
 | `house_power_manager.rebalance` | – |
 
-Events `house_power_manager_device_shed` and `house_power_manager_device_restored` carry `device`, `device_id`, `reason` (`over_target`, `emergency`, `preempted`, `headroom`), `power` and `grid_import`.
+Events `house_power_manager_device_shed` and `house_power_manager_device_restored` carry `device`, `device_id`, `devices` (for a shared supply: its devices), `reason` (`over_target`, `emergency`, `preempted`, `headroom`), `power` and `grid_import`.
 
 ### Example: request floor heating from a schedule
 

@@ -118,19 +118,27 @@
             "name": "Name",
             "priority": "Priority",
             "control_entity": "Control entity",
+            "supply": "Power supply"
+          },
+          "data_description": {
+            "priority": "1 is shed first. A device can take power from running devices with a lower number.",
+            "control_entity": "The switch (or climate, water heater, fan, light) turned on when power is granted and off when it is shed.",
+            "supply": "Optional. The shared supply this device draws from, such as the outdoor unit of a multi-split air conditioner. Its power and timing are set on the supply. Add the supply first with **Add shared power supply**."
+          }
+        },
+        "power": {
+          "title": "{name}: power",
+          "description": "Power and timing of the device.",
+          "data": {
             "nominal_power": "Nominal power",
             "power_sensor": "Power sensor",
-            "supply_group": "Shared power supply",
             "min_on_time": "Minimum on time",
             "min_off_time": "Minimum off time",
             "latency": "Latency"
           },
           "data_description": {
-            "priority": "1 is shed first. A device can take power from running devices with a lower number.",
-            "control_entity": "The switch (or climate, water heater, fan, light) turned on when power is granted and off when it is shed.",
             "nominal_power": "Power drawn when running. Used to decide whether there is room to switch it on.",
             "power_sensor": "Optional. The device's real consumption, used instead of the nominal power when deciding what to shed.",
-            "supply_group": "Optional. Devices with the same name here share one supply, such as the indoor units of one multi-split outdoor unit, and are switched off together. Pick a name already in use or type a new one.",
             "min_on_time": "Not shed sooner than this after being switched on, unless import exceeds the hard limit.",
             "min_off_time": "Not switched on again sooner than this after being switched off.",
             "latency": "How long until a command shows in the grid measurement. Use more for cloud devices."
@@ -142,19 +150,27 @@
             "name": "Name",
             "priority": "Priority",
             "control_entity": "Control entity",
+            "supply": "Power supply"
+          },
+          "data_description": {
+            "priority": "1 is shed first. A device can take power from running devices with a lower number.",
+            "control_entity": "The switch (or climate, water heater, fan, light) turned on when power is granted and off when it is shed.",
+            "supply": "Optional. The shared supply this device draws from, such as the outdoor unit of a multi-split air conditioner. Its power and timing are set on the supply. Add the supply first with **Add shared power supply**."
+          }
+        },
+        "reconfigure_power": {
+          "title": "{name}: power",
+          "description": "Power and timing of the device.",
+          "data": {
             "nominal_power": "Nominal power",
             "power_sensor": "Power sensor",
-            "supply_group": "Shared power supply",
             "min_on_time": "Minimum on time",
             "min_off_time": "Minimum off time",
             "latency": "Latency"
           },
           "data_description": {
-            "priority": "1 is shed first. A device can take power from running devices with a lower number.",
-            "control_entity": "The switch (or climate, water heater, fan, light) turned on when power is granted and off when it is shed.",
             "nominal_power": "Power drawn when running. Used to decide whether there is room to switch it on.",
             "power_sensor": "Optional. The device's real consumption, used instead of the nominal power when deciding what to shed.",
-            "supply_group": "Optional. Devices with the same name here share one supply, such as the indoor units of one multi-split outdoor unit, and are switched off together. Pick a name already in use or type a new one.",
             "min_on_time": "Not shed sooner than this after being switched on, unless import exceeds the hard limit.",
             "min_off_time": "Not switched on again sooner than this after being switched off.",
             "latency": "How long until a command shows in the grid measurement. Use more for cloud devices."
@@ -163,13 +179,68 @@
       },
       "error": {
         "name_required": "Enter a name.",
-        "name_in_use": "Another managed device has this name.",
+        "name_in_use": "Another managed device or supply has this name.",
         "control_in_use": "Another managed device already uses this control entity.",
         "sensor_not_found": "The sensor does not exist.",
         "unsupported_unit": "The sensor must report power in W, kW or MW."
       },
       "abort": {
         "reconfigure_successful": "The managed device was updated."
+      }
+    },
+    "supply": {
+      "initiate_flow": {
+        "user": "Add shared power supply",
+        "reconfigure": "Change shared power supply"
+      },
+      "entry_type": "Shared power supply",
+      "step": {
+        "user": {
+          "title": "Shared power supply",
+          "description": "Power shared by several managed devices, such as the outdoor unit of a multi-split air conditioner. When it has to be switched off, all its devices go off; when there is room again, the devices still requested come back on. Choose it as **Power supply** on each of its devices.",
+          "data": {
+            "name": "Name",
+            "nominal_power": "Nominal power",
+            "power_sensor": "Power sensor",
+            "min_on_time": "Minimum on time",
+            "min_off_time": "Minimum off time",
+            "latency": "Latency"
+          },
+          "data_description": {
+            "nominal_power": "Power drawn by the supply and all its devices together when running, e.g. the outdoor unit's rated input. Used to decide whether there is room to switch it on.",
+            "power_sensor": "Optional. A meter on the supply, used instead of the nominal power when deciding what to shed.",
+            "min_on_time": "Not shed sooner than this after being switched on, unless import exceeds the hard limit. Protects the outdoor unit's compressor.",
+            "min_off_time": "Not switched on again sooner than this after being switched off.",
+            "latency": "How long until a command shows in the grid measurement. Use more for cloud devices."
+          }
+        },
+        "reconfigure": {
+          "title": "Shared power supply",
+          "data": {
+            "name": "Name",
+            "nominal_power": "Nominal power",
+            "power_sensor": "Power sensor",
+            "min_on_time": "Minimum on time",
+            "min_off_time": "Minimum off time",
+            "latency": "Latency"
+          },
+          "data_description": {
+            "nominal_power": "Power drawn by the supply and all its devices together when running, e.g. the outdoor unit's rated input. Used to decide whether there is room to switch it on.",
+            "power_sensor": "Optional. A meter on the supply, used instead of the nominal power when deciding what to shed.",
+            "min_on_time": "Not shed sooner than this after being switched on, unless import exceeds the hard limit. Protects the outdoor unit's compressor.",
+            "min_off_time": "Not switched on again sooner than this after being switched off.",
+            "latency": "How long until a command shows in the grid measurement. Use more for cloud devices."
+          }
+        }
+      },
+      "error": {
+        "name_required": "Enter a name.",
+        "name_in_use": "Another managed device or supply has this name.",
+        "sensor_not_found": "The sensor does not exist.",
+        "unsupported_unit": "The sensor must report power in W, kW or MW."
+      },
+      "abort": {
+        "reconfigure_successful": "The shared power supply was updated."
       }
     }
   },

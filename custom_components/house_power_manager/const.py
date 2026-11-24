@@ -76,9 +76,14 @@ CONF_POWER_SENSOR: Final = "power_sensor"
 CONF_MIN_ON_TIME: Final = "min_on_time"  # s
 CONF_MIN_OFF_TIME: Final = "min_off_time"  # s
 CONF_LATENCY: Final = "latency"  # s before a command shows in the grid measurement
-# Devices with the same supply name share one power supply, e.g. the indoor units of a
-# multi-split outdoor unit; they are shed together
+# The shared power supply (a supply subentry id) a device draws from, e.g. the outdoor
+# unit of a multi-split air conditioner. Its power and timing settings are the supply's.
+CONF_SUPPLY: Final = "supply"
+# Before 0.4: devices with the same supply name shared a supply. Migrated to CONF_SUPPLY.
 CONF_SUPPLY_GROUP: Final = "supply_group"
+
+# ---- Shared power supplies (config subentries) --------------------------
+SUBENTRY_SUPPLY: Final = "supply"
 
 DEVICE_DEFAULTS: Final = {
     CONF_PRIORITY: 50,

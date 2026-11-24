@@ -20,10 +20,8 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     coordinator = entry.runtime_data
-    for device in coordinator.devices.values():
-        async_add_entities(
-            [GrantedSensor(coordinator, device, GRANTED)], config_subentry_id=device.id
-        )
+    for unit in [*coordinator.devices.values(), *coordinator.supplies.values()]:
+        async_add_entities([GrantedSensor(coordinator, unit, GRANTED)], config_subentry_id=unit.id)
 
 
 class GrantedSensor(HpmDeviceEntity, BinarySensorEntity):
