@@ -45,11 +45,21 @@ Devices switched off to make room for a more important device (`preempted`) or b
 
 Settings → Devices & services → **House Power Manager** → **Add managed device**. Each device can be changed (⋮ → Reconfigure) or deleted on its own.
 
+First pick the device type. It decides which entity controls the device and what stands in for it in automations:
+
+| Type | Control entity | Switched with | Stand-in for automations |
+|---|---|---|---|
+| Climate | `climate` (thermostat, air conditioner, heat pump) | its HVAC mode | `climate.<name>_power_managed` |
+| Switch | `switch`, `input_boolean`, `fan`, `light` | turn on / off | `switch.<name>_requested` |
+| Water heater | `water_heater` (e.g. a heat pump's hot water) | its operation mode | `water_heater.<name>_power_managed` |
+
+The type stays as added; to change it, delete the device and add it again.
+
 | Setting | Meaning |
 |---|---|
 | Name | Also names the device's entities, e.g. *Floor heating* → `switch.floor_heating_requested` |
 | Priority | 1–100. **1 is shed first.** A waiting device can take power from running devices with a lower number. |
-| Control entity | The switch (or climate, water heater, fan, light) turned on when power is granted and off when shed |
+| Control entity | The entity of the chosen type, turned on when power is granted and off when shed |
 | Power supply | Optional, once a shared power supply exists (see below). A device on a shared supply has no power settings of its own: the next step is skipped. |
 
 A device on its own supply then gets a second step:
@@ -77,6 +87,20 @@ The balancer then treats the supply as one load:
 - A device switched on by hand also runs its supply.
 
 Each indoor unit keeps its own **Requested** and **Managed** switches. Power, granted and state for the outdoor unit are on the supply's device.
+
+### Thermostats, water heaters and Room Climate: the power-managed stand-ins
+
+A **Climate** device gets a stand-in `climate.<name>_power_managed`, a **Water heater** device gets `water_heater.<name>_power_managed`. Give the stand-in to Room Climate, or any other automation, **instead of the device itself**. The water heater stand-in works like the climate one below, with operation modes in place of HVAC modes.
+
+- **Setting a mode is a request.** Setting off releases it. The thermostat is switched on in that mode, with the setpoint asked for, as soon as power is granted.
+- **It shows what was asked for, not what was granted.** While the device is shed, the stand-in still shows *heat* and the requested setpoint, so Room Climate sees nothing to correct and doesn't switch the device back on behind the balancer. The `power_state` attribute shows `running` or `shed`.
+- **Everything else is the thermostat's own:** current temperature, HVAC action, modes, temperature limits and fan modes. Setpoint and fan mode go straight to a running thermostat.
+- **Changes on the thermostat itself are followed:** a mode or setpoint set on the device or in its app shows up on the stand-in.
+- **Pass-through:** with power management switched off, or the device's **Managed** switch off, commands go straight to the thermostat.
+
+Climate devices are switched with their HVAC mode (`set_hvac_mode`) and water heaters with their operation mode (`set_operation_mode`), so devices without the optional turn on / turn off features work too.
+
+For a **Switch** device, the `switch.<name>_requested` switch is the stand-in: it shows the request, not the grant.
 
 > **Switching a device by hand is followed, not fought.** If a managed device is switched on or off outside the integration (wall switch, app, another automation), that becomes its new request and grant. A device that is already on when you add it keeps running. A device switched on by hand still counts in balancing: when the measurement shows import over target it can be shed like any other, and it comes back on once there is room. Turn the device's **Managed** switch off to keep the integration from ever switching it.
 
@@ -113,6 +137,7 @@ Each managed device (`<name>` from its name):
 | `sensor.<name>_granted_power` | Power the device draws: its power sensor, or its nominal power while it is on (0 when off). Not for a device on a shared supply. |
 | `sensor.<name>_state` | `idle` / `running` / `shed` / `override`; attributes priority, reason, last change, `power_supply` |
 | `switch.<name>_managed` | Off: the device is left alone (its power still counts in grid import) |
+| `climate.<name>_power_managed` / `water_heater.<name>_power_managed` | Climate / Water heater devices: the stand-in to drive instead of the device (see above) |
 
 Each shared power supply has `binary_sensor.<name>_granted`, `sensor.<name>_granted_power` (its power sensor, or its nominal power while any of its devices is on) and `sensor.<name>_state` (attribute `devices`).
 

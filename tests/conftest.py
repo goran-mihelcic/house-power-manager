@@ -5,6 +5,7 @@ from homeassistant.setup import async_setup_component
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.house_power_manager.config_flow import HpmConfigFlow
 from custom_components.house_power_manager.const import (
     CONF_CONTROL_ENTITY,
     CONF_DEVICE_TYPE,
@@ -15,9 +16,9 @@ from custom_components.house_power_manager.const import (
     CONF_NOMINAL_POWER,
     CONF_PRIORITY,
     CONF_SUPPLY,
+    CONTROL_DOMAINS,
     DEFAULTS,
     DEVICE_DEFAULTS,
-    DEVICE_TYPE_SWITCH,
     DOMAIN,
     SUBENTRY_DEVICE,
     SUBENTRY_SUPPLY,
@@ -41,6 +42,12 @@ def set_grid(hass: HomeAssistant, value: Any, unit: str | None = "W") -> None:
     hass.states.async_set(GRID, str(value), attrs, force_update=True)
 
 
+def _kind(control: str) -> str:
+    """The device type that goes with the control entity, as the config flow offers it."""
+    domain = control.split(".")[0]
+    return next((k for k, domains in CONTROL_DOMAINS.items() if domain in domains), "switch")
+
+
 def device(subentry_id: str, name: str, control: str, power: float, **data: Any) -> dict[str, Any]:
     """Subentry data for a switched managed device."""
     return {
@@ -49,7 +56,7 @@ def device(subentry_id: str, name: str, control: str, power: float, **data: Any)
         "title": name,
         "unique_id": None,
         "data": {
-            CONF_DEVICE_TYPE: DEVICE_TYPE_SWITCH,
+            CONF_DEVICE_TYPE: _kind(control),
             **DEVICE_DEFAULTS,
             CONF_CONTROL_ENTITY: control,
             CONF_NOMINAL_POWER: power,
@@ -83,7 +90,7 @@ def member(subentry_id: str, name: str, control: str, supply_id: str, priority: 
         "title": name,
         "unique_id": None,
         "data": {
-            CONF_DEVICE_TYPE: DEVICE_TYPE_SWITCH,
+            CONF_DEVICE_TYPE: _kind(control),
             CONF_PRIORITY: priority,
             CONF_CONTROL_ENTITY: control,
             CONF_SUPPLY: supply_id,
@@ -106,6 +113,7 @@ async def setup_hpm(
         title="House Power Manager",
         options={**DEFAULTS, CONF_GRID_SENSOR: GRID, **options},
         subentries_data=devices or [],
+        minor_version=HpmConfigFlow.MINOR_VERSION,
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)

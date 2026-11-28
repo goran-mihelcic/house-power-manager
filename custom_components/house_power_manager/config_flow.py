@@ -45,7 +45,10 @@ from .const import (
     CONTROL_DOMAINS,
     DEFAULTS,
     DEVICE_DEFAULTS,
+    DEVICE_TYPE_CLIMATE,
     DEVICE_TYPE_SWITCH,
+    DEVICE_TYPE_WATER_HEATER,
+    DEVICE_TYPES,
     DOMAIN,
     SIGN_IMPORT_NEGATIVE,
     SIGN_IMPORT_POSITIVE,
@@ -107,13 +110,14 @@ def _supply_options(entry: ConfigEntry) -> list[sel.SelectOptionDict]:
     ]
 
 
-def _device_schema(entry: ConfigEntry) -> vol.Schema:
-    """Who the device is; the power supply field only once a supply exists."""
+def _device_schema(entry: ConfigEntry, kind: str) -> vol.Schema:
+    """Who the device is; the control entity of its type; the power supply field only
+    once a supply exists."""
     schema: dict[vol.Marker, Any] = {
         vol.Required(CONF_NAME): sel.TextSelector(),
         vol.Required(CONF_PRIORITY): _number(1, 100, 1),
         vol.Required(CONF_CONTROL_ENTITY): sel.EntitySelector(
-            sel.EntitySelectorConfig(domain=CONTROL_DOMAINS)
+            sel.EntitySelectorConfig(domain=CONTROL_DOMAINS[kind])
         ),
     }
     if supplies := _supply_options(entry):
@@ -203,7 +207,8 @@ class HpmConfigFlow(ConfigFlow, domain=DOMAIN):
     """Set up the single House Power Manager entry."""
 
     VERSION = 1
-    MINOR_VERSION = 2  # 2: shared supplies are subentries, not names on devices
+    # 2: shared supplies are subentries, not names on devices. 3: devices have a type.
+    MINOR_VERSION = 3
 
     @staticmethod
     @callback
@@ -253,16 +258,36 @@ class HpmOptionsFlow(OptionsFlow):
 class DeviceSubentryFlow(ConfigSubentryFlow):
     """Add or change a managed device. The name is the subentry title.
 
-    A device on a shared supply is done after the first step; one on its own supply
-    goes on to its power and timing settings.
+    Adding starts with the device type, which sets the kind of control entity and the
+    stand-in entity. A device on a shared supply is done after the device step; one on
+    its own supply goes on to its power and timing settings. The type stays as added.
     """
 
     def __init__(self) -> None:
+        self._kind = DEVICE_TYPE_SWITCH
         self._name = ""
         self._data: dict[str, Any] = {}
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
-        return await self._async_step_device("user", None, user_input)
+        return self.async_show_menu(step_id="user", menu_options=list(DEVICE_TYPES))
+
+    async def async_step_climate(self, user_input: None = None) -> SubentryFlowResult:
+        return await self._async_pick(DEVICE_TYPE_CLIMATE)
+
+    async def async_step_switch(self, user_input: None = None) -> SubentryFlowResult:
+        return await self._async_pick(DEVICE_TYPE_SWITCH)
+
+    async def async_step_water_heater(self, user_input: None = None) -> SubentryFlowResult:
+        return await self._async_pick(DEVICE_TYPE_WATER_HEATER)
+
+    async def _async_pick(self, kind: str) -> SubentryFlowResult:
+        self._kind = kind
+        return await self.async_step_device()
+
+    async def async_step_device(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        return await self._async_step_device("device", None, user_input)
 
     async def async_step_power(
         self, user_input: dict[str, Any] | None = None
@@ -273,6 +298,7 @@ class DeviceSubentryFlow(ConfigSubentryFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         subentry = self._get_reconfigure_subentry()
+        self._kind = subentry.data.get(CONF_DEVICE_TYPE, DEVICE_TYPE_SWITCH)
         return await self._async_step_device(
             "reconfigure", {CONF_NAME: subentry.title, **subentry.data}, user_input
         )
@@ -298,7 +324,7 @@ class DeviceSubentryFlow(ConfigSubentryFlow):
             errors = _validate_device(entry, user_input, subentry_id)
             if not errors:
                 self._name = user_input.pop(CONF_NAME).strip()
-                self._data = {CONF_DEVICE_TYPE: DEVICE_TYPE_SWITCH, **user_input}
+                self._data = {CONF_DEVICE_TYPE: self._kind, **user_input}
                 if user_input.get(CONF_SUPPLY):
                     return self._async_finish()
                 if self._reconfiguring:
@@ -307,7 +333,8 @@ class DeviceSubentryFlow(ConfigSubentryFlow):
         return self.async_show_form(
             step_id=step_id,
             data_schema=self.add_suggested_values_to_schema(
-                _device_schema(entry), {**DEVICE_DEFAULTS, **(current or {}), **(user_input or {})}
+                _device_schema(entry, self._kind),
+                {**DEVICE_DEFAULTS, **(current or {}), **(user_input or {})},
             ),
             errors=errors,
         )

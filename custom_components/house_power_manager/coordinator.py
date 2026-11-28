@@ -4,13 +4,29 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import timedelta
 import logging
 from typing import Any, TypeGuard
 
+from homeassistant.components.climate import (
+    ATTR_FAN_MODE,
+    ATTR_HVAC_MODE,
+    ATTR_HVAC_MODES,
+    SERVICE_SET_FAN_MODE,
+    SERVICE_SET_HVAC_MODE,
+    SERVICE_SET_TEMPERATURE,
+    HVACMode,
+)
+from homeassistant.components.water_heater import (
+    ATTR_OPERATION_LIST,
+    ATTR_OPERATION_MODE,
+    SERVICE_SET_OPERATION_MODE,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     ATTR_ENTITY_ID,
+    ATTR_TEMPERATURE,
     ATTR_UNIT_OF_MEASUREMENT,
     SERVICE_TURN_OFF,
     SERVICE_TURN_ON,
@@ -52,6 +68,8 @@ from .const import (
     CONF_WARNING_MARGIN,
     DEBOUNCE_SECONDS,
     DEFAULT_HYSTERESIS,
+    DEVICE_TYPE_CLIMATE,
+    DEVICE_TYPE_WATER_HEATER,
     DOMAIN,
     EVENT_DEVICE_RESTORED,
     EVENT_DEVICE_SHED,
@@ -93,6 +111,57 @@ def _read(state: State | None, import_positive: bool) -> tuple[float | None, str
 
 def _known(state: State | None) -> TypeGuard[State]:
     return state is not None and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+
+
+def to_float(value: Any) -> float | None:
+    """A number from a state attribute; None when there is none."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class ModeControl:
+    """How a device switched with a mode is driven; its state is the current mode."""
+
+    modes: str  # attribute listing the modes
+    service: str  # sets the mode
+    field: str  # the mode in that service call
+    preferred: tuple[str, ...]  # switched on in the first of these it has, if none asked for
+
+
+MODE_CONTROLS: dict[str, ModeControl] = {
+    DEVICE_TYPE_CLIMATE: ModeControl(
+        ATTR_HVAC_MODES,
+        SERVICE_SET_HVAC_MODE,
+        ATTR_HVAC_MODE,
+        (HVACMode.HEAT, HVACMode.HEAT_COOL, HVACMode.COOL, HVACMode.AUTO),
+    ),
+    DEVICE_TYPE_WATER_HEATER: ModeControl(
+        ATTR_OPERATION_LIST,
+        SERVICE_SET_OPERATION_MODE,
+        ATTR_OPERATION_MODE,
+        ("heat_pump", "eco", "electric", "performance", "high_demand", "gas"),
+    ),
+}
+
+
+def modes(device: ManagedDevice, state: State) -> list[str]:
+    """The modes the device offers, off included if it has one."""
+    return list(state.attributes.get(MODE_CONTROLS[device.kind].modes) or [])
+
+
+def on_mode(device: ManagedDevice, state: State) -> str | None:
+    """The mode the device is switched on in: the one asked for, else a preferred one.
+    None when it has no modes to choose from (a water heater with only on / off)."""
+    on = [m for m in modes(device, state) if m != STATE_OFF]
+    if device.desired_mode in on:
+        return device.desired_mode
+    for mode in MODE_CONTROLS[device.kind].preferred:
+        if mode in on:
+            return mode
+    return on[0] if on else None
 
 
 def _reload_relevant(entry: ConfigEntry) -> dict[str, tuple[str, dict[str, Any]]]:
@@ -199,6 +268,9 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         device.granted = is_on
         device.requested = device.requested or is_on
         device.commanded_at = None
+        if is_on and device.uses_modes:
+            device.desired_mode = state.state
+            device.desired_temp = to_float(state.attributes.get(ATTR_TEMPERATURE))
         self._follow_supply(device, now)
 
     def _follow_supply(self, device: ManagedDevice, now: float) -> None:
@@ -253,15 +325,18 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         old, new = event.data["old_state"], event.data["new_state"]
         if not _known(old) or not _known(new):
             return  # coming online or dropping out is not a manual change
-        is_on = new.state != STATE_OFF
-        if is_on == (old.state != STATE_OFF):
-            return
         device = next((d for d in self.devices.values() if d.control_entity == new.entity_id), None)
-        if device is None or not device.managed or is_on == device.granted:
+        if device is None or not device.managed:
             return
         now = dt_util.utcnow().timestamp()
         if device.commanded_at is not None and now - device.commanded_at < device.latency:
             return  # our own command is still taking effect
+        is_on = new.state != STATE_OFF
+        if device.uses_modes and self._follow_modes(device, old, new, is_on):
+            self._save()
+            self.async_update_listeners()
+        if is_on == (old.state != STATE_OFF) or is_on == device.granted:
+            return
         _LOGGER.info(
             "%s switched %s outside House Power Manager: following",
             device.name,
@@ -275,6 +350,23 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         self._save()
         self.async_update_listeners()
         self._refresh_now()
+
+    @staticmethod
+    def _follow_modes(device: ManagedDevice, old: State, new: State, is_on: bool) -> bool:
+        """A mode or setpoint set on the device itself becomes the one asked for."""
+        changed = False
+        if is_on and new.state != old.state and new.state != device.desired_mode:
+            device.desired_mode = new.state
+            changed = True
+        temp = to_float(new.attributes.get(ATTR_TEMPERATURE))
+        if (
+            temp is not None
+            and temp != to_float(old.attributes.get(ATTR_TEMPERATURE))
+            and temp != device.desired_temp
+        ):
+            device.desired_temp = temp
+            changed = True
+        return changed
 
     @callback
     def _refresh_now(self) -> None:
@@ -480,7 +572,8 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
             state = self.hass.states.get(device.control_entity)
             if not device.managed or not _known(state):
                 continue
-            if (state.state != STATE_OFF) == device.granted:
+            commands = self._commands(device, state)
+            if not commands:
                 continue
             if device.commanded_at is not None:
                 if now - device.commanded_at < max(device.latency, RETRY_SECONDS):
@@ -492,16 +585,52 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
                     "granted" if device.granted else "not granted",
                 )
             device.commanded_at = now
-            service = SERVICE_TURN_ON if device.granted else SERVICE_TURN_OFF
-            try:
-                await self.hass.services.async_call(
-                    split_entity_id(device.control_entity)[0],
-                    service,
-                    {ATTR_ENTITY_ID: device.control_entity},
-                    blocking=False,
-                )
-            except HomeAssistantError as err:
-                _LOGGER.warning("Cannot %s %s: %s", service, device.control_entity, err)
+            for service, data in commands:
+                await self._async_call(device, service, data)
+
+    @staticmethod
+    def _commands(device: ManagedDevice, state: State) -> list[tuple[str, dict[str, Any]]]:
+        """What brings the control entity to the grant; nothing when it is there already.
+
+        A climate device or water heater is switched with its mode (turn_on / turn_off are
+        optional features for both): on in the mode asked for, with the setpoint asked for.
+        """
+        is_on = state.state != STATE_OFF
+        if not device.uses_modes:
+            if is_on == device.granted:
+                return []
+            return [(SERVICE_TURN_ON if device.granted else SERVICE_TURN_OFF, {})]
+        control = MODE_CONTROLS[device.kind]
+        if not device.granted:
+            if not is_on:
+                return []
+            if STATE_OFF in modes(device, state):
+                return [(control.service, {control.field: STATE_OFF})]
+            return [(SERVICE_TURN_OFF, {})]
+        mode = on_mode(device, state)
+        if is_on and (not device.desired_mode or state.state == mode):
+            return []  # running; in its own mode until a mode is asked for
+        if mode is None:  # nothing to choose from: plain on
+            return [] if is_on else [(SERVICE_TURN_ON, {})]
+        commands = [(control.service, {control.field: mode})]
+        if device.desired_temp is not None:
+            commands.append((SERVICE_SET_TEMPERATURE, {ATTR_TEMPERATURE: device.desired_temp}))
+        return commands
+
+    async def _async_call(
+        self, device: ManagedDevice, service: str, data: dict[str, Any] | None = None
+    ) -> None:
+        """A command to the control entity; its echo is not taken for a manual change."""
+        device.commanded_at = dt_util.utcnow().timestamp()
+        try:
+            await self.hass.services.async_call(
+                split_entity_id(device.control_entity)[0],
+                service,
+                {ATTR_ENTITY_ID: device.control_entity, **(data or {})},
+                blocking=False,
+            )
+        except HomeAssistantError as err:
+            _LOGGER.warning("Cannot %s %s: %s", service, device.control_entity, err)
 
     # ---- Readings --------------------------------------------------------
 
@@ -600,6 +729,51 @@ class HpmCoordinator(DataUpdateCoordinator[GridSnapshot]):
         self._save()
         self.async_update_listeners()
         self._refresh_now()
+
+    async def async_mode_command(
+        self,
+        device: ManagedDevice,
+        *,
+        mode: str | None = None,
+        on: bool | None = None,
+        temperature: float | None = None,
+        fan_mode: str | None = None,
+    ) -> None:
+        """A command to a power-managed stand-in (climate entity or water heater).
+
+        A mode other than off (or on) is a request, off releases it; the device gets the
+        mode once granted. Setpoint and fan mode go to the device while it runs. With
+        power management off, or the device left alone, everything goes straight through.
+        """
+        through = not self.enabled or not device.managed
+        if temperature is not None:
+            device.desired_temp = temperature
+            if through or device.granted:
+                await self._async_call(
+                    device, SERVICE_SET_TEMPERATURE, {ATTR_TEMPERATURE: temperature}
+                )
+        if fan_mode is not None:
+            await self._async_call(device, SERVICE_SET_FAN_MODE, {ATTR_FAN_MODE: fan_mode})
+        if mode is not None:
+            on = mode != STATE_OFF
+            if on:
+                device.desired_mode = mode
+        if on is not None:
+            if on != device.requested:
+                _LOGGER.info("%s %s", device.name, "requested" if on else "released")
+            device.requested = on
+            if through:
+                device.granted = on
+            if through or (on and device.granted):
+                if mode is not None:
+                    control = MODE_CONTROLS[device.kind]
+                    await self._async_call(device, control.service, {control.field: mode})
+                else:
+                    await self._async_call(device, SERVICE_TURN_ON if on else SERVICE_TURN_OFF)
+        self._save()
+        self.async_update_listeners()
+        if not through:
+            self._refresh_now()
 
     @callback
     def async_set_managed(self, device: ManagedDevice, managed: bool) -> None:

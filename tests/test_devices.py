@@ -372,10 +372,18 @@ NEW_POWER = {
 }
 
 
-async def _start_flow(hass: HomeAssistant, entry, subentry_type: str = SUBENTRY_DEVICE) -> dict:
+async def _start_flow(
+    hass: HomeAssistant, entry, subentry_type: str = SUBENTRY_DEVICE, kind: str = "switch"
+) -> dict:
     result = await hass.config_entries.subentries.async_init(
         (entry.entry_id, subentry_type), context={"source": SOURCE_USER}
     )
+    if subentry_type == SUBENTRY_DEVICE:  # first the device type
+        assert result["type"] is FlowResultType.MENU
+        assert result["menu_options"] == ["climate", "switch", "water_heater"]
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {"next_step_id": kind}
+        )
     assert result["type"] is FlowResultType.FORM
     return result
 
@@ -661,7 +669,7 @@ async def test_supply_names_from_0_3_are_migrated(hass: HomeAssistant) -> None:
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
-    assert entry.minor_version == 2
+    assert entry.minor_version == 3
     supplies = [s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_SUPPLY]
     assert [s.title for s in supplies] == ["Outdoor unit"]
     assert supplies[0].data[CONF_NOMINAL_POWER] == 2000
@@ -731,3 +739,43 @@ async def test_limit_warning_once_until_back_under_target(
         set_grid(hass, value)
         await hass.async_block_till_done(wait_background_tasks=True)
     assert len(calls) == 2
+
+
+async def test_add_climate_device(hass: HomeAssistant) -> None:
+    entry = await _setup(hass, FLOOR)
+    result = await _start_flow(hass, entry, kind="climate")
+    control = result["data_schema"].schema[CONF_CONTROL_ENTITY]
+    assert control.config["domain"] == ["climate"]
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        {CONF_NAME: "Bedroom AC", CONF_PRIORITY: 3, CONF_CONTROL_ENTITY: "climate.bedroom"},
+    )
+    result = await hass.config_entries.subentries.async_configure(result["flow_id"], NEW_POWER)
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    ac = next(s for s in entry.subentries.values() if s.title == "Bedroom AC")
+    assert ac.data["type"] == "climate"
+
+
+async def test_device_types_from_before_0_5_are_migrated(hass: HomeAssistant) -> None:
+    set_grid(hass, 1000)
+    old = [
+        device("floor", "Floor heating", "input_boolean.floor", 2000, type="switch"),
+        device("ac", "Bedroom AC", "climate.bedroom", 1000, type="switch"),
+        device("tank", "Hot water", "water_heater.tank", 3000, type="switch"),
+    ]
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        entry_id=ENTRY_ID,
+        options={**DEFAULTS, CONF_GRID_SENSOR: GRID},
+        subentries_data=old,
+        minor_version=2,
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.minor_version == 3
+    assert {sub.subentry_id: sub.data["type"] for sub in entry.subentries.values()} == {
+        "floor": "switch",
+        "ac": "climate",
+        "tank": "water_heater",
+    }

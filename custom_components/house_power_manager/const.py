@@ -68,7 +68,11 @@ FAULT_STALE: Final = "stale"
 # ---- Managed devices (config subentries) --------------------------------
 SUBENTRY_DEVICE: Final = "device"
 CONF_DEVICE_TYPE: Final = "type"
-DEVICE_TYPE_SWITCH: Final = "switch"  # fixed power, on or off
+# What the device is, and so which entities control it and which stand-in it gets
+DEVICE_TYPE_SWITCH: Final = "switch"  # on / off; stand-in: the Requested switch
+DEVICE_TYPE_CLIMATE: Final = "climate"  # switched with its HVAC mode; climate stand-in
+DEVICE_TYPE_WATER_HEATER: Final = "water_heater"  # with its operation mode; stand-in too
+DEVICE_TYPES: Final = (DEVICE_TYPE_CLIMATE, DEVICE_TYPE_SWITCH, DEVICE_TYPE_WATER_HEATER)
 CONF_PRIORITY: Final = "priority"  # 1 = shed first
 CONF_CONTROL_ENTITY: Final = "control_entity"
 CONF_NOMINAL_POWER: Final = "nominal_power"  # W
@@ -92,8 +96,12 @@ DEVICE_DEFAULTS: Final = {
     CONF_LATENCY: 10,
 }
 
-# Entity domains a switch-type device can be driven through with turn_on / turn_off
-CONTROL_DOMAINS: Final = ["switch", "input_boolean", "climate", "water_heater", "fan", "light"]
+# Entity domains each device type is driven through
+CONTROL_DOMAINS: Final = {
+    DEVICE_TYPE_SWITCH: ["switch", "input_boolean", "fan", "light"],
+    DEVICE_TYPE_CLIMATE: ["climate"],
+    DEVICE_TYPE_WATER_HEATER: ["water_heater"],
+}
 
 # ---- Events -------------------------------------------------------------
 EVENT_DEVICE_SHED: Final = f"{DOMAIN}_device_shed"

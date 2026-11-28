@@ -113,6 +113,15 @@
       "step": {
         "user": {
           "title": "Managed device",
+          "description": "What kind of device is it?",
+          "menu_options": {
+            "climate": "Climate: thermostat, air conditioner, heat pump",
+            "switch": "Switch: switch, input boolean, fan or light",
+            "water_heater": "Water heater"
+          }
+        },
+        "device": {
+          "title": "Managed device",
           "description": "A load switched on and off by House Power Manager. Once added, turn on its **Requested** switch (or call `house_power_manager.request_power`) instead of switching the device directly.",
           "data": {
             "name": "Name",
@@ -122,7 +131,7 @@
           },
           "data_description": {
             "priority": "1 is shed first. A device can take power from running devices with a lower number.",
-            "control_entity": "The switch (or climate, water heater, fan, light) turned on when power is granted and off when it is shed.",
+            "control_entity": "The entity turned on when power is granted and off when it is shed.",
             "supply": "Optional. The shared supply this device draws from, such as the outdoor unit of a multi-split air conditioner. Its power and timing are set on the supply. Add the supply first with **Add shared power supply**."
           }
         },
@@ -154,7 +163,7 @@
           },
           "data_description": {
             "priority": "1 is shed first. A device can take power from running devices with a lower number.",
-            "control_entity": "The switch (or climate, water heater, fan, light) turned on when power is granted and off when it is shed.",
+            "control_entity": "The entity turned on when power is granted and off when it is shed.",
             "supply": "Optional. The shared supply this device draws from, such as the outdoor unit of a multi-split air conditioner. Its power and timing are set on the supply. Add the supply first with **Add shared power supply**."
           }
         },
@@ -258,6 +267,19 @@
         "name": "Granted"
       }
     },
+    "climate": {
+      "power_managed": {
+        "name": "Power managed"
+      }
+    },
+    "number": {
+      "import_limit": {
+        "name": "Import limit"
+      },
+      "margin": {
+        "name": "Margin"
+      }
+    },
     "sensor": {
       "grid_import": {
         "name": "Grid import"
@@ -291,14 +313,6 @@
         }
       }
     },
-    "number": {
-      "import_limit": {
-        "name": "Import limit"
-      },
-      "margin": {
-        "name": "Margin"
-      }
-    },
     "switch": {
       "enabled": {
         "name": "Enabled"
@@ -308,6 +322,11 @@
       },
       "managed": {
         "name": "Managed"
+      }
+    },
+    "water_heater": {
+      "power_managed": {
+        "name": "Power managed"
       }
     }
   },

@@ -12,6 +12,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from .balancer import DeviceInput, Reason
 from .const import (
     CONF_CONTROL_ENTITY,
+    CONF_DEVICE_TYPE,
     CONF_LATENCY,
     CONF_MIN_OFF_TIME,
     CONF_MIN_ON_TIME,
@@ -20,6 +21,9 @@ from .const import (
     CONF_PRIORITY,
     CONF_SUPPLY,
     DEVICE_DEFAULTS,
+    DEVICE_TYPE_CLIMATE,
+    DEVICE_TYPE_SWITCH,
+    DEVICE_TYPE_WATER_HEATER,
     DOMAIN,
 )
 
@@ -81,13 +85,29 @@ class ManagedDevice(PowerUnit):
     """A load switched through its control entity."""
 
     MODEL: ClassVar[str] = "Managed device"
-    STORED: ClassVar[tuple[str, ...]] = (*PowerUnit.STORED, "requested", "managed")
+    STORED: ClassVar[tuple[str, ...]] = (
+        *PowerUnit.STORED,
+        "requested",
+        "managed",
+        "desired_mode",
+        "desired_temp",
+    )
 
     priority: int
     control_entity: str
+    kind: str = DEVICE_TYPE_SWITCH  # device type
     supply_id: str | None = None  # draws from this shared supply
     requested: bool = False
     managed: bool = True
+    # A climate device or water heater: the mode to run in (HVAC or operation mode) and
+    # the setpoint asked for, applied when granted
+    desired_mode: str | None = None
+    desired_temp: float | None = None
+
+    @property
+    def uses_modes(self) -> bool:
+        """Switched with a mode rather than turn_on / turn_off."""
+        return self.kind in (DEVICE_TYPE_CLIMATE, DEVICE_TYPE_WATER_HEATER)
 
     @classmethod
     def from_subentry(cls, subentry: ConfigSubentry) -> ManagedDevice:
@@ -97,6 +117,7 @@ class ManagedDevice(PowerUnit):
             name=subentry.title,
             priority=int(data[CONF_PRIORITY]),
             control_entity=data[CONF_CONTROL_ENTITY],
+            kind=data.get(CONF_DEVICE_TYPE, DEVICE_TYPE_SWITCH),
             supply_id=data.get(CONF_SUPPLY),
             **_power_settings(data),
         )

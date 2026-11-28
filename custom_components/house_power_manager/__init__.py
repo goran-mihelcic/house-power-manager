@@ -12,12 +12,16 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
+    CONF_CONTROL_ENTITY,
+    CONF_DEVICE_TYPE,
     CONF_LATENCY,
     CONF_MIN_OFF_TIME,
     CONF_MIN_ON_TIME,
     CONF_NOMINAL_POWER,
     CONF_SUPPLY,
     CONF_SUPPLY_GROUP,
+    CONTROL_DOMAINS,
+    DEVICE_TYPE_SWITCH,
     DOMAIN,
     SUBENTRY_DEVICE,
     SUBENTRY_SUPPLY,
@@ -29,9 +33,11 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
+    Platform.CLIMATE,
     Platform.NUMBER,
     Platform.SENSOR,
     Platform.SWITCH,
+    Platform.WATER_HEATER,
 ]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -67,7 +73,26 @@ async def async_migrate_entry(hass: HomeAssistant, entry: HpmConfigEntry) -> boo
     if entry.minor_version < 2:
         _migrate_supply_names(hass, entry)
         hass.config_entries.async_update_entry(entry, minor_version=2)
+    if entry.minor_version < 3:
+        _migrate_device_types(hass, entry)
+        hass.config_entries.async_update_entry(entry, minor_version=3)
     return True
+
+
+def _migrate_device_types(hass: HomeAssistant, entry: HpmConfigEntry) -> None:
+    """Before 0.5 every device was a switch; its control entity tells what it is."""
+    for sub in list(entry.subentries.values()):
+        if sub.subentry_type != SUBENTRY_DEVICE:
+            continue
+        domain = sub.data[CONF_CONTROL_ENTITY].split(".")[0]
+        kind = next(
+            (kind for kind, domains in CONTROL_DOMAINS.items() if domain in domains),
+            DEVICE_TYPE_SWITCH,
+        )
+        if sub.data.get(CONF_DEVICE_TYPE) != kind:
+            hass.config_entries.async_update_subentry(
+                entry, sub, data={**sub.data, CONF_DEVICE_TYPE: kind}
+            )
 
 
 def _migrate_supply_names(hass: HomeAssistant, entry: HpmConfigEntry) -> None:
